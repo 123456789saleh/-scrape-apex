@@ -2308,6 +2308,24 @@ function extractProductsFromDom(
     }
   }
 
+  // Helper to detect Cloudflare or protection text
+  const isCloudflareOrProtectionText = (t: string): boolean => {
+    const lower = (t || '').toLowerCase();
+    return (
+      lower.includes('just a moment') ||
+      lower.includes('attention required') ||
+      lower.includes('access denied') ||
+      lower.includes('security challenge') ||
+      lower.includes('cloudflare') ||
+      lower.includes('verify you are human') ||
+      lower.includes('please wait') ||
+      lower.includes('ddos protection') ||
+      lower.includes('cf-browser-verification') ||
+      lower.includes('403 forbidden') ||
+      lower.includes('404 not found')
+    );
+  };
+
   // B. Universal HTML Product Card Selectors across Magento, Prestashop, WooCommerce, Shopify, Custom E-commerce
   const cardSelectors = [
     'li.item.product-item',
@@ -2347,13 +2365,49 @@ function extractProductsFromDom(
   ];
 
   const combinedCardSelector = cardSelectors.join(', ');
-  const cards = $(combinedCardSelector);
+
+  // Rule 1: Scoped Container Discovery:
+  // Restrict extraction strictly within the primary product grid container!
+  // This strictly prevents extracting suggested products, cookers/stoves outside the list, sidebars, or footer widgets.
+  const scopedContainerSelectors = [
+    '#js-product-list',
+    '.products-selection',
+    '#products',
+    '.products-grid',
+    '.product-list-container',
+    '.products.wrapper',
+    '.products-list',
+    '.catalog-grid',
+    '[data-hook="product-list"]',
+    '#main-products-container',
+    '.main-products',
+    '#catalog-products',
+    '.search-results-products',
+    '.product-listing',
+    '.products-grid-container',
+    '#product-list-container',
+    '.main-catalog-grid'
+  ];
+
+  let cards = $(combinedCardSelector);
+  for (const selector of scopedContainerSelectors) {
+    const found = $(selector);
+    if (found.length > 0 && found.find(combinedCardSelector).length > 0) {
+      cards = found.find(combinedCardSelector);
+      break;
+    }
+  }
   const totalCards = cards.length;
 
   if (cards.length > 0) {
     cards.each((idx, el) => {
       // Discard container elements that contain other product cards
       if ($(el).find(combinedCardSelector).length > 0) return;
+
+      // Rule 1: Exclude sidebar, footer, header, recommended products, cross-sells, upsells
+      if ($(el).closest('header, footer, nav, aside, .sidebar, #sidebar, .recommended-products, .cross-sell, .upsell, .related-products, #related-products, .footer-bottom, .site-footer, .block-reorder, .widget-products, .suggested-products').length > 0) {
+        return;
+      }
 
       const parentSection = $(el).closest('section, .products-block, .box-product, .carousel, .owl-carousel, [class*="section"], [class*="block"]');
       const sectionTitle = parentSection.find('h1, h2, h3, .title_block, .box-title, .title-module, .section-title').first().text().trim() || '';
@@ -2364,7 +2418,8 @@ function extractProductsFromDom(
                     $(el).find('img').first().attr('alt')?.trim() || '';
 
       const normalizedTitle = title.toLowerCase().replace(/\s+/g, ' ');
-      if (!title || title.length < 3 || seenTitles.has(normalizedTitle)) return;
+      // Rule 2: Cloudflare & Protection Text Filter
+      if (!title || title.length < 3 || seenTitles.has(normalizedTitle) || isCloudflareOrProtectionText(title)) return;
 
       // Price: priority: price / .price-wrapper / [data-price-amount]
       let price = 0;
@@ -2413,10 +2468,44 @@ function extractProductsFromDom(
                           $(el).find('img.brand-logo').attr('alt')?.trim() || '';
       const brand = brandFromEl || detectBrand(title, $(el).text()) || 'General Store';
 
+      // Rule 3: Image extraction (data-src -> data-lazy-src -> src -> srcset)
       const { mainImage, galleryImages } = extractAccurateProductImageFromElement($, el, baseUrl);
 
-      const link = $(el).find('a.product-link, a.thumbnail, a').first().attr('href') || '';
-      const productUrl = link.startsWith('http') ? link : (link ? `${parsedUrl.origin}/${link.replace(/^\//, '')}` : baseUrl);
+      // Rule 2: Drop if image is mock Unsplash
+      if (mainImage.includes('unsplash.com') || mainImage.includes('images.unsplash.com')) return;
+
+      // Rule 2 & D: Product link must end with .html or be a real product link, not category pagination ?p=2
+      let link = $(el).find('a[href$=".html"]:not([href*="?p="]):not([href*="?page="]):not([href*="compare"]):not([href*="wishlist"])').first().attr('href') ||
+                 $(el).find('a.product-item-link, a.product-item-photo, a.product-link, a[href*="/product/"], a[href*="/p/"], a[href*=".html"]').first().attr('href') ||
+                 $(el).find('a[href]').first().attr('href') || '';
+
+      if (link.startsWith('#') || link.startsWith('javascript:')) link = '';
+      let productUrl = '';
+      if (link) {
+        try {
+          productUrl = link.startsWith('http') ? link : new URL(link, baseUrl).href;
+        } catch {
+          productUrl = link;
+        }
+      }
+
+      if (productUrl) {
+        try {
+          const uObj = new URL(productUrl);
+          const baseObj = new URL(baseUrl);
+          const isCategoryPaginationOnly = (uObj.pathname === baseObj.pathname) && (uObj.searchParams.has('p') || uObj.searchParams.has('page') || uObj.searchParams.has('pg'));
+          if (isCategoryPaginationOnly || productUrl === baseUrl) {
+            const fallbackHtml = $(el).find('a[href*=".html"]').first().attr('href');
+            if (fallbackHtml && !fallbackHtml.includes('?p=') && !fallbackHtml.includes('?page=')) {
+              productUrl = fallbackHtml.startsWith('http') ? fallbackHtml : new URL(fallbackHtml, baseUrl).href;
+            } else {
+              return; // Not a valid individual product URL
+            }
+          }
+        } catch {}
+      } else {
+        return;
+      }
 
       if (seenUrls.has(productUrl) && productUrl !== baseUrl) return;
       seenUrls.add(productUrl);
@@ -2457,7 +2546,7 @@ function extractProductsFromDom(
       $(el).find('img').each((_, gImg) => {
         const gSrc = $(gImg).attr('data-full-size-image-url') || $(gImg).attr('data-zoom-image') || $(gImg).attr('src') || '';
         const fullGSrc = gSrc.startsWith('http') ? gSrc : (gSrc ? `${parsedUrl.origin}/${gSrc.replace(/^\//, '')}` : '');
-        if (fullGSrc && !galleryImages.includes(fullGSrc) && !fullGSrc.includes('spacer.gif') && !fullGSrc.includes('blank.gif')) {
+        if (fullGSrc && !galleryImages.includes(fullGSrc) && !fullGSrc.includes('spacer.gif') && !fullGSrc.includes('blank.gif') && !fullGSrc.includes('unsplash.com')) {
           galleryImages.push(fullGSrc);
         }
       });
@@ -2483,7 +2572,7 @@ function extractProductsFromDom(
         category: sectionTitle || 'عروض المنتجات',
         sku: `SKU-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
         specs,
-        mainImage: mainImage || 'https://images.unsplash.com/photo-1593359677879-a4bb92f829d1?w=600&auto=format&fit=crop&q=80',
+        mainImage,
         galleryImages: galleryImages.length > 0 ? galleryImages : (mainImage ? [mainImage] : []),
         productUrl,
         shippingInfo,
@@ -2491,70 +2580,6 @@ function extractProductsFromDom(
       });
     });
   }
-
-  // C. Deep Fallback Scanner for Elements at the Bottom of the Page or in Infinite Scroll Containers
-  // This catches any products rendered lower down or lazy-loaded at the bottom of the page
-  const genericContainers = $('article, .prd, .c-prd, [class*="product"], [class*="item"], [class*="card"], [class*="catalog"], [class*="offer"], li');
-  genericContainers.each((_, el) => {
-    const $el = $(el);
-    if ($el.closest(combinedCardSelector).length > 0) return;
-
-    const priceEl = $el.find('.current-price, .price, [class*="price"], [class*="amount"], .prc, .special-price, .product-price, span:contains("EGP"), span:contains("ج.م"), span:contains("$"), span:contains("SAR")').first();
-    const priceText = priceEl.text().trim();
-    if (!priceText) return;
-
-    const { price, currency } = parsePriceAndCurrency(priceText);
-    if (price <= 0) return;
-
-    const titleEl = $el.find('.product-title, .product-name, h2, h3, h4, .title, .name, [class*="title"], [class*="name"], a[title]').first();
-    const title = titleEl.text().trim() || $el.find('a').first().attr('title')?.trim() || $el.find('img').first().attr('alt')?.trim() || '';
-    if (!title || title.length < 4) return;
-
-    const normalizedTitle = title.toLowerCase().replace(/\s+/g, ' ');
-    if (seenTitles.has(normalizedTitle)) return;
-    seenTitles.add(normalizedTitle);
-
-    const { mainImage, galleryImages } = extractAccurateProductImageFromElement($, el, baseUrl);
-
-    const linkEl = $el.is('a') ? $el : $el.find('a[href]').first();
-    const href = linkEl.attr('href') || '';
-    const productUrl = href ? (href.startsWith('http') ? href : `${parsedUrl.origin}/${href.replace(/^\//, '')}`) : baseUrl;
-
-    const origPriceEl = $el.find('.old-price, .regular-price, del, [class*="original"], [class*="old"], s').first();
-    const origPriceText = origPriceEl.text().trim();
-    const parsedOriginalPrice = origPriceText ? parsePriceAndCurrency(origPriceText).price : undefined;
-    const originalPrice = parsedOriginalPrice && parsedOriginalPrice > price ? parsedOriginalPrice : undefined;
-    const discountPercentage = originalPrice ? Math.round(((originalPrice - price) / originalPrice) * 100) : undefined;
-
-    let brand = detectBrand(title, $el.text()) || 'General Store';
-    const sellerName = parsedUrl.hostname.replace(/^www\./, '').split('.')[0].toUpperCase();
-
-    products.push({
-      id: `prod-p${pageNumber}-bottom-${products.length + 1}`,
-      pageNumber,
-      displayOrder: products.length + 1,
-      title,
-      price,
-      originalPrice,
-      currency,
-      discountPercentage,
-      rating: 4.8,
-      reviewsCount: Math.floor(Math.random() * 50) + 10,
-      inStock: true,
-      availabilityText: 'متاح في المخزون (تم سحبه عبر التمرير لأسفل Infinite Scroll)',
-      seller: sellerName,
-      sellerDetails: `تم استخلاصه من قاع الصفحة عبر محاكاة التمرير لأسفل (Scroll)`,
-      brand,
-      category: 'عناصر أسفل الصفحة والتمرير التلقائي',
-      sku: `SKU-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
-      specs: {},
-      mainImage: mainImage || 'https://images.unsplash.com/photo-1593359677879-a4bb92f829d1?w=600&auto=format&fit=crop&q=80',
-      galleryImages: galleryImages.length > 0 ? galleryImages : (mainImage ? [mainImage] : []),
-      productUrl,
-      shippingInfo: 'شحن قياسي سريع',
-      warrantyInfo: 'ضمان محلي معتمد'
-    });
-  });
 
   return products;
 }
@@ -2595,6 +2620,8 @@ function extractAccurateProductImageFromElement($: cheerio.CheerioAPI, el: any, 
       lower.includes('badge') ||
       lower.includes('spinner') ||
       lower.includes('loading.') ||
+      lower.includes('unsplash.com') ||
+      lower.includes('images.unsplash.com') ||
       lower === 'data:image/gif;base64,r0lgodlhaqabaiaaaaaaap///yh5baeaaaaalaaaaaabaaeaaaibraa7'
     );
   };
@@ -2603,17 +2630,14 @@ function extractAccurateProductImageFromElement($: cheerio.CheerioAPI, el: any, 
   $(el).find('img').each((_, imgEl) => {
     const $img = $(imgEl);
     
-    // Priority order for attribute clarity
+    // Priority order strictly: 1. data-src, 2. data-lazy-src, 3. src, 4. srcset
     const attrs = [
-      $img.attr('data-full-size-image-url'),
-      $img.attr('data-image-large-src'),
-      $img.attr('data-original'),
       $img.attr('data-src'),
       $img.attr('data-lazy-src'),
-      $img.attr('data-lazy'),
+      $img.attr('data-original'),
+      $img.attr('data-full-size-image-url'),
+      $img.attr('data-image-large-src'),
       $img.attr('data-zoom-image'),
-      $img.attr('data-large'),
-      $img.attr('data-hi-res-src'),
       $img.attr('src')
     ];
 
@@ -3166,48 +3190,82 @@ export async function runScrapingEngine(config: ScrapeConfig): Promise<ScrapeRes
 
       addLog('info', `📑 [نظام سحب كل صفحات المتجر والـ Scroll] جاري تتبع وسحب الصفحات المتعاقبة (صفحة 1 حتى ${maxPagesLimit}) وسحب كافة العناصر السفلية...`);
 
+      let consecutiveEmptyPages = 0;
       for (let pNum = 2; pNum <= maxPagesLimit; pNum++) {
-        try {
-          const nextUrl = constructPageUrl(config.url, pNum, detectedPagination);
-          addLog('info', `🌐 [جاري جلب صفحة ${pNum}/${maxPagesLimit}] الاتصال بـ: ${nextUrl}`);
+        let pSuccess = false;
+        const nextUrl = constructPageUrl(config.url, pNum, detectedPagination);
 
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 12000);
-          const pResponse = await fetch(nextUrl, {
-            headers: {
-              'User-Agent': userAgent,
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-              'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-              'Referer': config.url
-            },
-            signal: controller.signal
-          });
-          clearTimeout(timeout);
-
-          if (pResponse.ok) {
-            const pageHtml = await pResponse.text();
-            const $page = cheerio.load(pageHtml);
-            
-            // Run DOM tracking and lazy scroll simulation on this page
-            runSmartDomTrackingAndScrollSimulation($page, config, addLog);
-
-            // Extract products from page N
-            const pageNProducts = extractProductsFromDom($page, nextUrl, pNum, config);
-            if (pageNProducts.length > 0) {
-              actualPagesScraped++;
-              products.push(...pageNProducts);
-              addLog('success', `✓ [صفحة ${pNum}/${maxPagesLimit}] تم سحب ${pageNProducts.length} منتج بنجاح عبر محاكاة التمرير لأسفل (المجموع التراكمي: ${products.length} منتج).`);
+        // Retry & Pagination Performance: retry up to 2 times and bypass temporary blackouts
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            if (attempt > 1) {
+              addLog('info', `🌐 [إعادة محاولة الاتصال ${attempt}/2 - صفحة ${pNum}/${maxPagesLimit}] الاتصال بـ: ${nextUrl}...`);
+              await new Promise(r => setTimeout(r, 600));
             } else {
-              addLog('info', `ℹ️ [صفحة ${pNum}] لم يتم العثور على منتجات إضافية، تم الوصول لنهاية كتالوج المتجر واستخلاص كافة الصفحات.`);
+              addLog('info', `🌐 [جاري جلب صفحة ${pNum}/${maxPagesLimit}] الاتصال بـ: ${nextUrl}`);
+            }
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 12000);
+            const pResponse = await fetch(nextUrl, {
+              headers: {
+                'User-Agent': userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+                'Referer': config.url
+              },
+              signal: controller.signal
+            });
+            clearTimeout(timeout);
+
+            if (pResponse.ok) {
+              const pageHtml = await pResponse.text();
+              const lowerHtml = pageHtml.toLowerCase();
+
+              // Rule 2 & 4: Detect and bypass Cloudflare or security challenge blackout pages
+              if (
+                lowerHtml.includes('just a moment') ||
+                lowerHtml.includes('attention required') ||
+                lowerHtml.includes('access denied') ||
+                lowerHtml.includes('security challenge') ||
+                lowerHtml.includes('cf-browser-verification')
+              ) {
+                addLog('warn', `⚠️ [صفحة ${pNum}] تم اكتشاف صفحة حماية معتتمة (Cloudflare/Challenge). جاري تخطيها والمتابعة للصفحة التالية...`);
+                break; // Skip this challenge page to probe the next page
+              }
+
+              const $page = cheerio.load(pageHtml);
+              
+              // Run DOM tracking and lazy scroll simulation on this page
+              runSmartDomTrackingAndScrollSimulation($page, config, addLog);
+
+              // Extract products from page N
+              const pageNProducts = extractProductsFromDom($page, nextUrl, pNum, config);
+              if (pageNProducts.length > 0) {
+                actualPagesScraped++;
+                products.push(...pageNProducts);
+                consecutiveEmptyPages = 0;
+                pSuccess = true;
+                addLog('success', `✓ [صفحة ${pNum}/${maxPagesLimit}] تم سحب ${pageNProducts.length} منتج بنجاح عبر محاكاة التمرير لأسفل (المجموع التراكمي: ${products.length} منتج).`);
+                break;
+              }
+            } else if (pResponse.status === 403 || pResponse.status === 503) {
+              addLog('warn', `⚠️ [صفحة ${pNum}] تعذر الوصول (كود الحالة: ${pResponse.status}). جاري تخطي الصفحة المعتتمة والمتابعة...`);
               break;
             }
-          } else {
-            addLog('warn', `⚠️ توقف الزحف عند صفحة ${pNum} (كود الحالة: ${pResponse.status}).`);
+          } catch (pageErr: any) {
+            if (attempt === 2) {
+              addLog('warn', `⚠️ [صفحة ${pNum}] تعذر جلب الصفحة بعد محاولتين: ${pageErr?.message || 'Timeout'}`);
+            }
+          }
+        }
+
+        if (!pSuccess) {
+          consecutiveEmptyPages++;
+          if (consecutiveEmptyPages >= 3) {
+            addLog('info', `ℹ️ [اكتمال الترقيم] توقف الزحف التلقائي بعد 3 صفحات متتالية فارغة أو معتتمة.`);
             break;
           }
-        } catch (pageErr: any) {
-          addLog('warn', `⚠️ انتهاء زحف الصفحات عند صفحة ${pNum}: ${pageErr.message || 'Timeout'}`);
-          break;
         }
       }
 

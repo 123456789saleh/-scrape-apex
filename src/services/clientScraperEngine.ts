@@ -228,19 +228,72 @@ export class ClientScraperEngine {
         }
 
         if (!currentNext || crawledUrls.has(currentNext)) {
-          addLog('info', `[اكتمال الترقيم] تم الوصول لآخر صفحة ترقيم متاحة أو تكرار الرابط عند الصفحة ${pageNum - 1}.`);
-          break;
+          // Attempt fallback page parameter progression before giving up
+          currentNext = this.constructFallbackPageUrl(config.url, pageNum, html);
+          if (!currentNext || crawledUrls.has(currentNext)) {
+            addLog('info', `[اكتمال الترقيم] تم الوصول لآخر صفحة ترقيم متاحة أو تكرار الرابط عند الصفحة ${pageNum - 1}.`);
+            break;
+          }
         }
 
         crawledUrls.add(currentNext);
 
-        try {
-          if (onProgress) {
-            const pct = Math.min(95, Math.round((pageNum / maxPagesToCrawl) * 100));
-            onProgress(pct, pageNum, maxPagesToCrawl, products.length + emails.length);
+        // Retry & Pagination Performance: retry up to 2 times and bypass temporary blackouts or Cloudflare challenges
+        let fetchSuccess = false;
+        let nextFetch: { html: string; status: number; method: string } | null = null;
+
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            if (onProgress) {
+              const pct = Math.min(95, Math.round((pageNum / maxPagesToCrawl) * 100));
+              onProgress(pct, pageNum, maxPagesToCrawl, products.length + emails.length);
+            }
+            if (attempt > 1) {
+              addLog('info', `[إعادة المحاولة ${attempt}/2 - صفحة ${pageNum}] إعادة الاتصال بعد تعتيم أو تأخير مؤقت: ${currentNext}...`);
+              await new Promise(r => setTimeout(r, 600));
+            } else {
+              addLog('info', `[حلقة السحب التجميعي - صفحة ${pageNum}/${maxPagesToCrawl}] جلب الرابط: ${currentNext}...`);
+            }
+
+            nextFetch = await this.fetchHtml(currentNext);
+            const lowerPayload = (nextFetch?.html || '').toLowerCase();
+
+            // Detect Cloudflare / Security Challenge blackout pages
+            if (
+              lowerPayload.includes('just a moment') ||
+              lowerPayload.includes('attention required') ||
+              lowerPayload.includes('access denied') ||
+              lowerPayload.includes('security challenge') ||
+              lowerPayload.includes('cf-browser-verification')
+            ) {
+              addLog('warn', `[صفحة ${pageNum}] تم اكتشاف صفحة حماية (Cloudflare/Challenge). جاري تخطي الصفحة المعتتمة والمتابعة للصفحة التالية...`);
+              nextFetch = null;
+              break; // Skip this challenge page and move to the next page
+            }
+
+            if (nextFetch && nextFetch.html.length > 200) {
+              fetchSuccess = true;
+              break;
+            }
+          } catch (fetchErr: any) {
+            if (attempt === 2) {
+              addLog('warn', `[صفحة ${pageNum}] تعذر جلب الصفحة بعد محاولتين: ${fetchErr?.message || 'خطأ في الاتصال'}. تخطي الصفحة والمتابعة...`);
+            }
           }
-          addLog('info', `[حلقة السحب التجميعي - صفحة ${pageNum}/${maxPagesToCrawl}] جلب الرابط: ${currentNext}...`);
-          const nextFetch = await this.fetchHtml(currentNext);
+        }
+
+        if (!nextFetch || !fetchSuccess) {
+          consecutiveEmptyPages++;
+          if (consecutiveEmptyPages >= 3) {
+            addLog('info', `[اكتمال الكتالوج] توقف السحب التلقائي بعد 3 صفحات متتالية فارغة أو معتتمة.`);
+            break;
+          }
+          pageNum++;
+          currentNext = this.constructFallbackPageUrl(config.url, pageNum, html);
+          continue;
+        }
+
+        try {
           let newProductsFromThisPage: ExtractedProduct[] = [];
           const textPayload = nextFetch.html.trim();
 
@@ -284,15 +337,15 @@ export class ClientScraperEngine {
             } else {
               consecutiveEmptyPages++;
               addLog('info', `[صفحة ${pageNum}] كافة المنتجات في هذه الصفحة موجودة بالفعل ضمن النتائج.`);
-              if (consecutiveEmptyPages >= 2) {
+              if (consecutiveEmptyPages >= 3) {
                 addLog('info', `[اكتمال الكتالوج] توقف السحب التلقائي بعد استخلاص ${pageNum - 1} صفحة بنجاح.`);
                 break;
               }
             }
           } else {
             consecutiveEmptyPages++;
-            addLog('info', `[صفحة ${pageNum}] لم يتم العثور على منتجات جديدة.`);
-            if (consecutiveEmptyPages >= 2) {
+            addLog('info', `[صفحة ${pageNum}] لم يتم العثور على منتجات جديدة (صفحة فارغة أو غير معنية).`);
+            if (consecutiveEmptyPages >= 3) {
               addLog('info', `[اكتمال الكتالوج] توقف السحب التلقائي بعد استخلاص ${pageNum - 1} صفحة بنجاح.`);
               break;
             }
@@ -302,8 +355,9 @@ export class ClientScraperEngine {
           currentNext = this.determineNextPageUrl(nextDoc || doc, currentNext, pageNum, nextFetch.html);
           pageNum++;
         } catch (e: any) {
-          addLog('warn', `توقف التمرير التلقائي عند الصفحة ${pageNum}: ${e?.message || 'خطأ في جلب الصفحة'}`);
-          break;
+          addLog('warn', `تنبيه أثناء معالجة الصفحة ${pageNum}: ${e?.message || 'خطأ في التحليل'}`);
+          pageNum++;
+          currentNext = this.constructFallbackPageUrl(config.url, pageNum, html);
         }
       }
     }
@@ -555,11 +609,52 @@ export class ClientScraperEngine {
       return 'منتجات المتجر';
     };
 
+    // Helper to detect Cloudflare, robot challenge, or security block text
+    const isCloudflareOrProtectionText = (text: string): boolean => {
+      if (!text) return false;
+      const lower = text.toLowerCase();
+      return (
+        lower.includes('just a moment') ||
+        lower.includes('attention required') ||
+        lower.includes('access denied') ||
+        lower.includes('security challenge') ||
+        lower.includes('cloudflare') ||
+        lower.includes('verify you are human') ||
+        lower.includes('please wait') ||
+        lower.includes('ddos protection') ||
+        lower.includes('cf-browser-verification') ||
+        lower.includes('403 forbidden') ||
+        lower.includes('404 not found')
+      );
+    };
+
+    // Helper to detect mock/default Unsplash filler images
+    const isUnsplashOrMockImage = (url: string): boolean => {
+      if (!url) return false;
+      const lower = url.toLowerCase();
+      return lower.includes('unsplash.com') || lower.includes('images.unsplash.com');
+    };
+
+    const isGarbageImage = (url: string): boolean => {
+      if (!url) return true;
+      const lower = url.toLowerCase();
+      return (
+        lower.includes('blank.gif') ||
+        lower.includes('spacer.gif') ||
+        lower.includes('pixel.') ||
+        lower.includes('spinner') ||
+        lower.includes('loading.') ||
+        lower.includes('icon-') ||
+        lower.includes('badge') ||
+        lower === 'data:image/gif;base64,r0lgodlhaqabaiaaaaaaap///yh5baeaaaaalaaaaaabaaeaaaibraa7' ||
+        isUnsplashOrMockImage(url)
+      );
+    };
+
     // 1. Process Smart Schema.org JSON-LD Products (Each individual product separately)
     jsonLdProducts.forEach((ld, idx) => {
       const title = (ld.name || ld.title || '').toString().trim();
-      if (!title || seenTitles.has(title)) return;
-      seenTitles.add(title);
+      if (!title || seenTitles.has(title) || isCloudflareOrProtectionText(title)) return;
 
       const offer = Array.isArray(ld.offers) ? ld.offers[0] : (ld.offers || {});
       const rawPrice = offer.price || offer.lowPrice || offer.highPrice || '0';
@@ -573,8 +668,25 @@ export class ClientScraperEngine {
       else if (Array.isArray(ld.image) && ld.image.length > 0) image = typeof ld.image[0] === 'string' ? ld.image[0] : ld.image[0]?.url || '';
       else if (ld.image && typeof ld.image === 'object') image = ld.image.url || ld.image.contentUrl || '';
 
-      const fallbackImage = getCategoryFallbackImage({ title, category, brand });
+      if (image && !image.startsWith('http://') && !image.startsWith('https://') && !image.startsWith('data:')) {
+        try { image = new URL(image, baseUrl).href; } catch {}
+      }
 
+      // Drop if image is mock Unsplash
+      if (isUnsplashOrMockImage(image)) return;
+
+      let productUrl = ld.url || '';
+      if (productUrl && !productUrl.startsWith('http')) {
+        try { productUrl = new URL(productUrl, baseUrl).href; } catch {}
+      }
+      if (productUrl === baseUrl || productUrl.includes('?p=') || productUrl.includes('?page=')) {
+        // Validate that it's a real product link
+        if (!productUrl.endsWith('.html') && !productUrl.includes('/product/') && !productUrl.includes('/p/')) {
+          productUrl = '';
+        }
+      }
+
+      seenTitles.add(title);
       products.push({
         id: `p_ld_${idx + 1}`,
         title,
@@ -583,10 +695,10 @@ export class ClientScraperEngine {
         currency,
         brand,
         category,
-        mainImage: image || fallbackImage,
-        galleryImages: Array.isArray(ld.image) ? ld.image.filter((x: any) => typeof x === 'string') : (image ? [image] : []),
+        mainImage: image,
+        galleryImages: Array.isArray(ld.image) ? ld.image.filter((x: any) => typeof x === 'string' && !isUnsplashOrMockImage(x)) : (image ? [image] : []),
         specs: ld.description ? { 'الوصف': String(ld.description).substring(0, 150) } : {},
-        productUrl: ld.url || baseUrl,
+        productUrl: productUrl || baseUrl,
         inStock: offer?.availability ? !String(offer.availability).toLowerCase().includes('outofstock') : true,
         rating: ld.aggregateRating?.ratingValue ? parseFloat(ld.aggregateRating.ratingValue) : 4.8,
         reviewsCount: ld.aggregateRating?.reviewCount ? parseInt(ld.aggregateRating.reviewCount) : 15,
@@ -595,8 +707,7 @@ export class ClientScraperEngine {
     });
 
     // 2. Multi-Item DOM Extraction: Decompose the product listing into individual cards
-    // Supported selectors covering Magento, Shopify, WooCommerce, PrestaShop, Salla, Zid, Custom:
-    // li.item.product-item, .product-item-info, .product-card, .grid__item, article.product, [class*="product-card"]
+    // Supported card selectors covering Magento, Shopify, WooCommerce, PrestaShop, Salla, Zid, Custom
     const primaryCardSelectors = [
       'li.item.product-item',
       '.product-item-info',
@@ -620,24 +731,63 @@ export class ClientScraperEngine {
     ];
 
     const cardQuerySelector = primaryCardSelectors.join(', ');
-    const allCandidateElements = Array.from(doc.querySelectorAll(cardQuerySelector));
+
+    // Rule 1: Scoped Container Discovery:
+    // Restrict extraction strictly within the primary product grid container!
+    // This strictly prevents extracting suggested products, cookers/stoves outside the list, sidebars, or footer widgets.
+    const scopedContainerSelectors = [
+      '#js-product-list',
+      '.products-selection',
+      '#products',
+      '.products-grid',
+      '.product-list-container',
+      '.products.wrapper',
+      '.products-list',
+      '.catalog-grid',
+      '[data-hook="product-list"]',
+      '#main-products-container',
+      '.main-products',
+      '#catalog-products',
+      '.search-results-products',
+      '.product-listing',
+      '.products-grid-container',
+      '#product-list-container',
+      '.main-catalog-grid'
+    ];
+
+    let scopedContainerEl: Element | null = null;
+    for (const selector of scopedContainerSelectors) {
+      const el = doc.querySelector(selector);
+      if (el && el.querySelectorAll(cardQuerySelector).length > 0) {
+        scopedContainerEl = el;
+        break;
+      }
+    }
+
+    const extractionRoot: Element | Document = scopedContainerEl || 
+                                              doc.querySelector('main, #main, #content, #maincontent, .main-content') || 
+                                              doc;
+
+    const allCandidateElements = Array.from(extractionRoot.querySelectorAll(cardQuerySelector));
 
     // Array Mapping: Discard main container elements and keep individual product cards!
-    // If an element contains other child elements matching the card selectors, it's a wrapper/container (e.g. products-grid), NOT a single leaf product card!
+    // Discard parent wrappers (e.g. products-grid) to only keep leaf product cards
     const individualCards = allCandidateElements.filter(el => {
-      // Discard HTML, BODY, MAIN, NAV, HEADER, FOOTER
+      // Discard HTML, BODY, MAIN, NAV, HEADER, FOOTER, SECTION with too many children
       const tag = el.tagName;
-      if (tag === 'BODY' || tag === 'HTML' || tag === 'MAIN' || tag === 'NAV' || tag === 'HEADER' || tag === 'FOOTER' || tag === 'SECTION' && el.children.length > 20) {
-        return false;
-      }
-      if (el.closest('header, footer, nav, #header, #footer, .site-header, .site-footer')) {
+      if (tag === 'BODY' || tag === 'HTML' || tag === 'MAIN' || tag === 'NAV' || tag === 'HEADER' || tag === 'FOOTER' || (tag === 'SECTION' && el.children.length > 20)) {
         return false;
       }
 
-      // Check if it contains nested child cards: if so, skip the parent container!
+      // Explicitly reject any elements in sidebars, footers, headers, cross-sells, upsells, recommended widgets
+      if (el.closest('header, footer, nav, aside, .sidebar, #sidebar, .recommended-products, .cross-sell, .upsell, .related-products, #related-products, .footer-bottom, .site-footer, .block-reorder, .widget-products, .suggested-products')) {
+        return false;
+      }
+
+      // Check if it contains nested child cards: if so, skip the parent container so we only map leaf cards!
       const hasChildCards = el.querySelectorAll(cardQuerySelector).length > 0;
       if (hasChildCards) {
-        return false; // Skip the container so we only map leaf cards!
+        return false;
       }
 
       // Check text content sanity
@@ -647,11 +797,14 @@ export class ClientScraperEngine {
       return true;
     });
 
-    // Fallback if individualCards is empty: find all divs/articles/lis with price and image
+    // Fallback if individualCards is empty: find cards within the scoped container or main content
     let targetCards = individualCards;
     if (targetCards.length === 0) {
-      const fallbackNodes = Array.from(doc.querySelectorAll('li, article, div.item, div.product, div.card'));
+      const fallbackNodes = Array.from(extractionRoot.querySelectorAll('li, article, div.item, div.product, div.card'));
       targetCards = fallbackNodes.filter(el => {
+        if (el.closest('header, footer, nav, aside, .sidebar, #sidebar, .recommended-products, .cross-sell, .upsell, .related-products')) {
+          return false;
+        }
         const text = el.textContent || '';
         const hasPrice = /(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€|\bLE\b|\bL\.E\b)\s*[\d,]+|[\d,]+\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ)/i.test(text) ||
                          el.querySelector('.price, [class*="price"], [itemprop="price"], [data-price-amount]') !== null;
@@ -669,7 +822,6 @@ export class ClientScraperEngine {
       let title = titleEl?.textContent?.trim() || titleEl?.getAttribute('title')?.trim() || '';
 
       if (!title || title.length < 3) {
-        // Try any anchor with text or image alt
         const altText = card.querySelector('img')?.getAttribute('alt')?.trim();
         if (altText && altText.length > 3 && !/logo|banner|icon/i.test(altText)) {
           title = altText;
@@ -682,8 +834,8 @@ export class ClientScraperEngine {
         }
       }
 
-      if (!title || title.length < 3 || seenTitles.has(title)) return;
-      seenTitles.add(title);
+      // Rule 2: Cloudflare & Protection Text Filter
+      if (!title || title.length < 3 || seenTitles.has(title) || isCloudflareOrProtectionText(title)) return;
 
       // B. Extract Product Price:
       // Priority: price / .price-wrapper / [data-price-amount] / [data-price-type="finalPrice"] / regex
@@ -723,44 +875,92 @@ export class ClientScraperEngine {
         card.textContent || ''
       );
 
-      // C. Extract Product Image:
-      // Priority: img.product-image-photo / data-src / src
-      const imgEl = card.querySelector('img.product-image-photo, img[data-src], img[data-lazy-src], img[data-original], img[data-zoom-image], img[srcset], img[src], img');
-      const candidateImg = imgEl?.getAttribute('src') || 
-                           imgEl?.getAttribute('data-src') || 
-                           imgEl?.getAttribute('data-lazy-src') || 
-                           imgEl?.getAttribute('data-original') ||
-                           imgEl?.getAttribute('data-zoom-image') ||
-                           imgEl?.getAttribute('srcset')?.split(' ')[0] || '';
-      
+      // Rule 3: Image extraction order: data-src -> data-lazy-src -> src -> srcset
+      // Convert relative URL to absolute URL using new URL(src, baseURL).href
       let mainImage = '';
-      if (candidateImg) {
-        try {
-          mainImage = candidateImg.startsWith('http') || candidateImg.startsWith('data:') 
-            ? candidateImg 
-            : new URL(candidateImg, baseUrl).href;
-        } catch {
-          mainImage = candidateImg;
+      const imgEl = card.querySelector('img.product-image-photo, img[data-src], img[data-lazy-src], img[data-original], img[srcset], img[src], img');
+      if (imgEl) {
+        const dataSrc = imgEl.getAttribute('data-src')?.trim();
+        const dataLazySrc = imgEl.getAttribute('data-lazy-src')?.trim() || imgEl.getAttribute('data-original')?.trim();
+        const rawSrc = imgEl.getAttribute('src')?.trim();
+        const rawSrcset = imgEl.getAttribute('srcset')?.trim() || imgEl.getAttribute('data-srcset')?.trim();
+
+        let candidateImg = '';
+        if (dataSrc && !isGarbageImage(dataSrc)) {
+          candidateImg = dataSrc;
+        } else if (dataLazySrc && !isGarbageImage(dataLazySrc)) {
+          candidateImg = dataLazySrc;
+        } else if (rawSrc && !isGarbageImage(rawSrc)) {
+          candidateImg = rawSrc;
+        } else if (rawSrcset) {
+          const firstPart = rawSrcset.split(',')[0].trim().split(/\s+/)[0];
+          if (firstPart && !isGarbageImage(firstPart)) candidateImg = firstPart;
+        }
+
+        if (candidateImg) {
+          try {
+            mainImage = candidateImg.startsWith('http://') || candidateImg.startsWith('https://') || candidateImg.startsWith('data:')
+              ? candidateImg
+              : new URL(candidateImg, baseUrl).href;
+          } catch {
+            mainImage = candidateImg;
+          }
         }
       }
 
-      // D. Extract Product URL (Link):
-      // Priority: a.product-item-link / a[href]
-      const linkEl = card.querySelector('a.product-item-link, a.product-item-photo, a[href*="/product/"], a[href*="/p/"], a[href*=".html"], a[href]');
-      const href = (card.tagName === 'A' ? card.getAttribute('href') : linkEl?.getAttribute('href')) || '';
-      let productUrl = baseUrl;
-      if (href && href !== '#' && !href.startsWith('javascript:')) {
+      // Rule 2: If the image is a mock Unsplash image, drop this item completely
+      if (isUnsplashOrMockImage(mainImage)) return;
+
+      // Rule 2 & D: Extract Product URL (Link):
+      // Must be a real product link ending in .html or containing /product/ or /p/, and NOT the page itself with ?p=2 query
+      const specificProductLink = card.querySelector(
+        'a[href$=".html"]:not([href*="?p="]):not([href*="?page="]):not([href*="compare"]):not([href*="wishlist"]), ' +
+        'a.product-item-link, a.product-item-photo, a[href*="/product/"], a[href*="/p/"], a[href*=".html"]'
+      );
+      let href = (specificProductLink?.getAttribute('href') || (card.tagName === 'A' ? card.getAttribute('href') : '') || card.querySelector('a[href]')?.getAttribute('href') || '').trim();
+
+      if (href.startsWith('#') || href.startsWith('javascript:')) {
+        href = '';
+      }
+
+      let productUrl = '';
+      if (href) {
         try {
-          productUrl = href.startsWith('http') ? href : new URL(href, baseUrl).href;
+          productUrl = href.startsWith('http://') || href.startsWith('https://')
+            ? href
+            : new URL(href, baseUrl).href;
         } catch {
           productUrl = href;
         }
       }
 
+      // Validate URL: verify that the extracted link is a real product link and not the category page with ?p=2
+      if (productUrl) {
+        try {
+          const uObj = new URL(productUrl);
+          const baseObj = new URL(baseUrl);
+          const isCategoryPaginationOnly = (uObj.pathname === baseObj.pathname) && (uObj.searchParams.has('p') || uObj.searchParams.has('page') || uObj.searchParams.has('pg'));
+          if (isCategoryPaginationOnly || productUrl === baseUrl) {
+            // Attempt to find a sub-anchor ending in .html
+            const fallbackHtmlAnchor = card.querySelector('a[href*=".html"]');
+            const fallbackHref = fallbackHtmlAnchor?.getAttribute('href');
+            if (fallbackHref && !fallbackHref.includes('?p=') && !fallbackHref.includes('?page=')) {
+              productUrl = fallbackHref.startsWith('http') ? fallbackHref : new URL(fallbackHref, baseUrl).href;
+            } else {
+              // Not a valid individual product URL - drop it
+              return;
+            }
+          }
+        } catch {}
+      } else {
+        return;
+      }
+
+      seenTitles.add(title);
+
       // Brand & Category
       const brand = detectBrand(title, card.querySelector('[itemprop="brand"], [data-brand], .brand')?.textContent?.trim());
       const category = detectCategory(title);
-      const fallbackImage = getCategoryFallbackImage({ title, category, brand });
 
       products.push({
         id: `p_dom_${products.length + 1}`,
@@ -770,7 +970,7 @@ export class ClientScraperEngine {
         currency,
         brand,
         category,
-        mainImage: mainImage || fallbackImage,
+        mainImage,
         galleryImages: mainImage ? [mainImage] : [],
         specs: {},
         productUrl,
@@ -788,11 +988,15 @@ export class ClientScraperEngine {
       const ogPrice = doc.querySelector('meta[property="og:price:amount"], meta[property="product:price:amount"], meta[name="price"], meta[property="price:amount"]')?.getAttribute('content')?.trim();
       const ogCurrency = doc.querySelector('meta[property="og:price:currency"], meta[property="product:price:currency"]')?.getAttribute('content')?.trim();
 
-      if (ogTitle && (ogPrice || ogImage) && !seenTitles.has(ogTitle)) {
+      if (ogTitle && (ogPrice || ogImage) && !seenTitles.has(ogTitle) && !isCloudflareOrProtectionText(ogTitle) && !isUnsplashOrMockImage(ogImage || '')) {
         const priceVal = ogPrice ? parseFloat(ogPrice.replace(/[^0-9.]/g, '')) : 0;
         const brand = detectBrand(ogTitle);
         const category = detectCategory(ogTitle);
-        const fallbackImage = getCategoryFallbackImage({ title: ogTitle, category, brand });
+
+        let absOgImage = ogImage || '';
+        if (absOgImage && !absOgImage.startsWith('http')) {
+          try { absOgImage = new URL(absOgImage, baseUrl).href; } catch {}
+        }
 
         seenTitles.add(ogTitle);
         products.push({
@@ -802,8 +1006,8 @@ export class ClientScraperEngine {
           currency: normalizeCurrency(ogCurrency, ogTitle),
           brand,
           category,
-          mainImage: ogImage || fallbackImage,
-          galleryImages: ogImage ? [ogImage] : [],
+          mainImage: absOgImage,
+          galleryImages: absOgImage ? [absOgImage] : [],
           specs: {},
           productUrl: doc.querySelector('link[rel="canonical"]')?.getAttribute('href') || baseUrl,
           inStock: true,
@@ -814,20 +1018,21 @@ export class ClientScraperEngine {
       }
     }
 
-    // 5. GUARANTEE NEVER 0 PRODUCTS: Single Product Page Fallback
+    // 5. Fallback for Genuine Single-Product Pages (Never triggers on Cloudflare or protection pages)
     if (products.length === 0) {
       const pageHeading = doc.querySelector('h1, [itemprop="name"], .product-detail-title, .product_title')?.textContent?.trim() || doc.title;
-      if (pageHeading && pageHeading.length > 2) {
+      if (pageHeading && pageHeading.length > 2 && !isCloudflareOrProtectionText(pageHeading)) {
         const bodyText = doc.body?.textContent || '';
         const singlePriceMatch = bodyText.match(/(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€)\s*([\d,]+(?:\.\d+)?)/i) ||
                                  bodyText.match(/([\d,]+(?:\.\d+)?)\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ)/i);
         const singlePrice = singlePriceMatch ? parseFloat(singlePriceMatch[1].replace(/,/g, '')) : 0;
         const mainImgEl = doc.querySelector('.product-image img, .gallery-item img, [itemprop="image"], img[src*="product"], main img');
         const candidateMain = mainImgEl?.getAttribute('src') || mainImgEl?.getAttribute('data-src') || '';
-        const mainImage = candidateMain.startsWith('http') ? candidateMain : (candidateMain ? new URL(candidateMain, baseUrl).href : '');
+        let mainImage = candidateMain.startsWith('http') ? candidateMain : (candidateMain ? new URL(candidateMain, baseUrl).href : '');
+        if (isUnsplashOrMockImage(mainImage)) mainImage = '';
+
         const brand = detectBrand(pageHeading);
         const category = detectCategory(pageHeading);
-        const fallbackImage = getCategoryFallbackImage({ title: pageHeading, category, brand });
 
         products.push({
           id: `p_single_${Date.now()}`,
@@ -836,7 +1041,7 @@ export class ClientScraperEngine {
           currency: normalizeCurrency(undefined, bodyText),
           brand,
           category,
-          mainImage: mainImage || fallbackImage,
+          mainImage,
           galleryImages: mainImage ? [mainImage] : [],
           specs: {},
           productUrl: baseUrl,
@@ -1227,8 +1432,15 @@ export class ClientScraperEngine {
 
       if (urlObj.searchParams.has('p')) {
         urlObj.searchParams.set('p', String(pageNum));
-      } else {
+      } else if (urlObj.searchParams.has('page')) {
         urlObj.searchParams.set('page', String(pageNum));
+      } else {
+        const isMagento = baseUrl.includes('cairosales') || (rawHtml && (rawHtml.includes('catalog/category') || rawHtml.includes('product-item-info')));
+        if (isMagento) {
+          urlObj.searchParams.set('p', String(pageNum));
+        } else {
+          urlObj.searchParams.set('page', String(pageNum));
+        }
       }
       return urlObj.href;
     } catch {
