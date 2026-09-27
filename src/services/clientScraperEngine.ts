@@ -193,59 +193,109 @@ export class ClientScraperEngine {
 
     // 8. Extract Links & Automated Pagination Discovery (Virtual Scroll Simulation)
     const { links } = this.extractLinks(doc, config.url);
-    const firstNextUrl = this.determineNextPageUrl(doc, config.url, 1);
+    const firstNextUrl = this.determineNextPageUrl(doc, config.url, 1, html);
 
     // Multi-page crawling & Virtual Scroll Simulation client-side
-    // Determine maximum pages to crawl: respects config.maxPages or defaults to 3 pages if store has pagination
-    const maxPagesToCrawl = Math.max(1, Math.min(config.maxPages || (firstNextUrl ? 3 : 1), 10));
+    // Determine maximum pages to crawl based on paginationMode and user configuration
+    let maxPagesToCrawl = 1;
+    if (config.paginationMode === 'single_page') {
+      maxPagesToCrawl = 1;
+    } else if (config.paginationMode === 'first_n_pages') {
+      maxPagesToCrawl = config.maxPages && config.maxPages > 1 ? config.maxPages : 5;
+    } else if (config.paginationMode === 'auto_all_pages') {
+      maxPagesToCrawl = config.maxPages && config.maxPages > 1 ? config.maxPages : 50;
+    } else if (config.maxPages && config.maxPages > 0) {
+      maxPagesToCrawl = config.maxPages;
+    } else {
+      // Default: if pagination detected, crawl up to 5 pages, else 1 page
+      maxPagesToCrawl = firstNextUrl ? 5 : 1;
+    }
 
-    if (firstNextUrl && maxPagesToCrawl > 1) {
-      addLog('info', `[الترقيم والتمرير التلقائي] اكتشاف وجود صفحات إضافية: ${firstNextUrl} - بدء محاكاة التمرير وسحب كافة الصفحات...`);
+    if (maxPagesToCrawl === 1) {
+      addLog('info', 'تم اختيار نمط "سحب الصفحة الحالية فقط" (Single Page). تم الاكتفاء بمنتجات وبيانات الصفحة الأولى.');
+    } else {
+      addLog('info', `[مُتتبع صفحات الترقيم والـ Infinite Scroll] تفعيل السحب التجميعي المتتابع حتى ${maxPagesToCrawl} صفحة...`);
       let currentNext: string | null = firstNextUrl;
       let pageNum = 2;
       const crawledUrls = new Set<string>([config.url]);
+      const seenProductKeys = new Set<string>(products.map(p => this.getProductDeduplicationKey(p)));
+      let consecutiveEmptyPages = 0;
 
-      while (currentNext && pageNum <= maxPagesToCrawl) {
-        if (crawledUrls.has(currentNext)) break;
+      while (pageNum <= maxPagesToCrawl) {
+        // If currentNext is null, attempt candidate URL generation based on pageNum (e.g. ?p=2, ?page=2, or AJAX candidate)
+        if (!currentNext) {
+          currentNext = this.constructFallbackPageUrl(config.url, pageNum, html);
+        }
+
+        if (!currentNext || crawledUrls.has(currentNext)) {
+          addLog('info', `[اكتمال الترقيم] تم الوصول لآخر صفحة ترقيم متاحة أو تكرار الرابط عند الصفحة ${pageNum - 1}.`);
+          break;
+        }
+
         crawledUrls.add(currentNext);
 
         try {
           if (onProgress) {
-            const pct = Math.round((pageNum / maxPagesToCrawl) * 100);
+            const pct = Math.min(95, Math.round((pageNum / maxPagesToCrawl) * 100));
             onProgress(pct, pageNum, maxPagesToCrawl, products.length + emails.length);
           }
-          addLog('info', `[محاكاة التمرير اللانهائي] جلب وتحليل الصفحة رقم ${pageNum}...`);
+          addLog('info', `[حلقة السحب التجميعي - صفحة ${pageNum}/${maxPagesToCrawl}] جلب الرابط: ${currentNext}...`);
           const nextFetch = await this.fetchHtml(currentNext);
-          const nextDoc = parser.parseFromString(nextFetch.html, 'text/html');
-          const nextJsonLd = this.extractJsonLd(nextDoc);
+          let newProductsFromThisPage: ExtractedProduct[] = [];
+          const textPayload = nextFetch.html.trim();
 
-          let newProductsCount = 0;
-          if (config.mode === 'ecommerce' || config.mode === 'auto' || config.mode === 'ai_semantic') {
-            const nextProds = this.extractProductsFromDoc(nextDoc, currentNext, nextJsonLd.products);
-            const prevCount = products.length;
-            products.push(...nextProds);
-            newProductsCount = products.length - prevCount;
-            if (newProductsCount > 0) {
-              addLog('success', `[الصفحة ${pageNum}] تم استخراج ${newProductsCount} منتج إضافي (إجمالي المنتجات المجمعة: ${products.length})`);
+          // 1. Check if the response is JSON (AJAX / REST endpoint for infinite scroll)
+          if (textPayload.startsWith('{') || textPayload.startsWith('[')) {
+            newProductsFromThisPage = this.parseJsonProducts(textPayload, currentNext);
+            if (newProductsFromThisPage.length > 0) {
+              addLog('success', `[استجابة API خلفية] تم استخراج ${newProductsFromThisPage.length} منتج بنجاح من نقطة نهاية الـ JSON.`);
             }
           }
 
-          if (config.mode === 'emails' || config.mode === 'auto') {
-            const nextEmailRes = this.extractEmailsAndContacts(nextDoc, nextFetch.html, currentNext);
-            emails.push(...nextEmailRes.emails);
+          // 2. If not JSON or 0 products found from JSON, parse as HTML DOM
+          let nextDoc: Document | null = null;
+          if (newProductsFromThisPage.length === 0) {
+            nextDoc = parser.parseFromString(nextFetch.html, 'text/html');
+            const nextJsonLd = this.extractJsonLd(nextDoc);
+
+            if (config.mode === 'ecommerce' || config.mode === 'auto' || config.mode === 'ai_semantic') {
+              newProductsFromThisPage = this.extractProductsFromDoc(nextDoc, currentNext, nextJsonLd.products);
+            }
+
+            if (config.mode === 'emails' || config.mode === 'auto') {
+              const nextEmailRes = this.extractEmailsAndContacts(nextDoc, nextFetch.html, currentNext);
+              emails.push(...nextEmailRes.emails);
+            }
           }
 
-          // If a candidate page returned 0 new products, stop pagination gracefully
-          if (newProductsCount === 0 && pageNum > 2) {
-            addLog('info', `[اكتمال التمرير] انتهت منتجات المتجر عند الصفحة ${pageNum - 1}.`);
-            break;
+          // 3. Deduplication and merging into the unified table
+          let freshAddedCount = 0;
+          for (const prod of newProductsFromThisPage) {
+            const key = this.getProductDeduplicationKey(prod);
+            if (!seenProductKeys.has(key)) {
+              seenProductKeys.add(key);
+              products.push(prod);
+              freshAddedCount++;
+            }
           }
 
-          // Determine next page URL for pageNum + 1
-          currentNext = this.determineNextPageUrl(nextDoc, currentNext, pageNum);
+          if (freshAddedCount > 0) {
+            consecutiveEmptyPages = 0;
+            addLog('success', `[صفحة ${pageNum}] تم دمج ${freshAddedCount} منتج إضافي بنجاح (المجموع التراكمي: ${products.length} منتج)`);
+          } else {
+            consecutiveEmptyPages++;
+            addLog('info', `[صفحة ${pageNum}] لم يتم العثور على منتجات جديدة (تكرار المنتجات أو الوصول لنهاية الكتالوج).`);
+            if (consecutiveEmptyPages >= 1) {
+              addLog('info', `[اكتمال الكتالوج] توقف السحب التلقائي بعد استخلاص ${pageNum - 1} صفحة بنجاح.`);
+              break;
+            }
+          }
+
+          // 4. Find the next page URL for pageNum + 1
+          currentNext = this.determineNextPageUrl(nextDoc || doc, currentNext, pageNum, nextFetch.html);
           pageNum++;
-        } catch (e) {
-          addLog('warn', `توقف التمرير التلقائي عند الصفحة ${pageNum}: ${(e as any).message}`);
+        } catch (e: any) {
+          addLog('warn', `توقف التمرير التلقائي عند الصفحة ${pageNum}: ${e?.message || 'خطأ في جلب الصفحة'}`);
           break;
         }
       }
@@ -907,8 +957,13 @@ export class ClientScraperEngine {
   /**
    * Discovers the next page URL via DOM links, query parameter progression, or virtual scroll simulation
    */
-  private determineNextPageUrl(doc: Document, currentUrl: string, currentPageNum: number): string | null {
-    // 1. Rel next link tag or anchor
+  private determineNextPageUrl(
+    doc: Document, 
+    currentUrl: string, 
+    currentPageNum: number,
+    rawHtml?: string
+  ): string | null {
+    // 1. Rel next link tag or anchor: link[rel="next"], a[rel="next"]
     const relNext = doc.querySelector('link[rel="next"], a[rel="next"]')?.getAttribute('href');
     if (relNext) {
       try {
@@ -917,21 +972,58 @@ export class ClientScraperEngine {
       } catch {}
     }
 
-    // 2. Pagination DOM anchors with aria-label, class, or text
+    // 2. Pagination DOM containers (.pagination, .pager, [class*="pagination"], [class*="page-numbers"], nav[aria-label*="pagination"])
+    const paginationContainers = doc.querySelectorAll('.pagination, .pager, [class*="pagination"], [class*="page-numbers"], [class*="paging"], nav[aria-label*="pagination"], [role="navigation"]');
+    for (const container of Array.from(paginationContainers)) {
+      const anchors = Array.from(container.querySelectorAll('a[href]'));
+      for (const a of anchors) {
+        const href = a.getAttribute('href') || '';
+        const text = a.textContent?.trim().toLowerCase() || '';
+        const ariaLabel = (a.getAttribute('aria-label') || '').toLowerCase();
+        const className = (a.getAttribute('class') || '').toLowerCase();
+
+        const isNext = 
+          text === 'next' || text === 'التالي' || text === '›' || text === '»' || text === '→' ||
+          text.includes('next') || text.includes('التالي') ||
+          ariaLabel.includes('next') || ariaLabel.includes('التالي') ||
+          className.includes('next');
+
+        if (isNext && href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+          try {
+            const resolved = new URL(href, currentUrl).href;
+            if (resolved !== currentUrl) return resolved;
+          } catch {}
+        }
+
+        // Match numbered page anchor: text equals nextPageNum
+        const nextPageNumStr = String(currentPageNum + 1);
+        if (text === nextPageNumStr && href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+          try {
+            const resolved = new URL(href, currentUrl).href;
+            if (resolved !== currentUrl) return resolved;
+          } catch {}
+        }
+      }
+    }
+
+    // 3. Scan all document anchors for explicit pagination and next buttons
     const anchors = Array.from(doc.querySelectorAll('a[href]'));
+    const nextNumStr = String(currentPageNum + 1);
     for (const a of anchors) {
+      const href = a.getAttribute('href') || '';
+      if (!href || href.startsWith('#') || href.startsWith('javascript:')) continue;
+
       const text = a.textContent?.trim().toLowerCase() || '';
       const ariaLabel = (a.getAttribute('aria-label') || '').toLowerCase();
-      const href = a.getAttribute('href') || '';
       const className = (a.getAttribute('class') || '').toLowerCase();
 
       const isNextButton =
-        text === 'next' || text === 'التالي' || text === '›' || text === '»' ||
+        text === 'next' || text === 'التالي' || text === '›' || text === '»' || text === '→' ||
         text.includes('next page') || text.includes('الصفحة التالية') ||
         ariaLabel.includes('next') || ariaLabel.includes('التالي') ||
         className.includes('next') || className.includes('pagination__next') || className.includes('page-next');
 
-      if (isNextButton && href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+      if (isNextButton) {
         try {
           const resolved = new URL(href, currentUrl).href;
           if (resolved !== currentUrl) return resolved;
@@ -939,8 +1031,7 @@ export class ClientScraperEngine {
       }
 
       // Check numbered pagination anchor matching next page number (e.g. text "2")
-      const nextNumStr = String(currentPageNum + 1);
-      if (text === nextNumStr && href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+      if (text === nextNumStr && (href.includes('page') || href.includes('p=') || href.includes('pg='))) {
         try {
           const resolved = new URL(href, currentUrl).href;
           if (resolved !== currentUrl) return resolved;
@@ -948,7 +1039,23 @@ export class ClientScraperEngine {
       }
     }
 
-    // 3. Automated Query Parameter Progression (?page=2, ?p=2, ?pg=2, etc.)
+    // 4. AJAX & Infinite Scroll detection in DOM data attributes
+    const infiniteScrollElements = doc.querySelectorAll('[data-infinite-scroll], [data-next-page], [data-next-url], [data-endpoint], [data-url], [data-ajax-url], [class*="infinite-scroll"], [data-load-more], button.load-more');
+    for (const el of Array.from(infiniteScrollElements)) {
+      const nextAttr = el.getAttribute('data-next-url') || 
+                       el.getAttribute('data-next-page') || 
+                       el.getAttribute('data-endpoint') || 
+                       el.getAttribute('data-url') ||
+                       el.getAttribute('data-ajax-url');
+      if (nextAttr) {
+        try {
+          const resolved = new URL(nextAttr, currentUrl).href;
+          if (resolved !== currentUrl) return resolved;
+        } catch {}
+      }
+    }
+
+    // 5. Automated Query Parameter Progression (?page=2, ?p=2, ?pg=2, etc.)
     try {
       const urlObj = new URL(currentUrl);
       const nextPageNum = currentPageNum + 1;
@@ -969,6 +1076,11 @@ export class ClientScraperEngine {
         urlObj.searchParams.set('paged', String(nextPageNum));
         return urlObj.href;
       }
+      if (urlObj.searchParams.has('offset') && urlObj.searchParams.has('limit')) {
+        const limit = parseInt(urlObj.searchParams.get('limit') || '20', 10);
+        urlObj.searchParams.set('offset', String(currentPageNum * limit));
+        return urlObj.href;
+      }
 
       // Path-based pagination: /page/1 -> /page/2
       const pathMatch = urlObj.pathname.match(/\/page\/(\d+)/i);
@@ -976,16 +1088,155 @@ export class ClientScraperEngine {
         urlObj.pathname = urlObj.pathname.replace(/\/page\/\d+/i, `/page/${nextPageNum}`);
         return urlObj.href;
       }
-
-      // Virtual Scroll Simulation / Candidate for catalog pages on first page
-      if (currentPageNum === 1) {
-        const candidate = new URL(currentUrl);
-        candidate.searchParams.set('page', '2');
-        return candidate.href;
-      }
     } catch {}
 
+    // 6. Platform-specific API detection (Shopify, WooCommerce, etc.)
+    const platformApi = this.detectStoreApiEndpoint(currentUrl, currentPageNum + 1, rawHtml);
+    if (platformApi) {
+      return platformApi;
+    }
+
     return null;
+  }
+
+  /**
+   * Detects underlying store REST JSON APIs for infinite scroll (Shopify, WooCommerce, etc.)
+   */
+  private detectStoreApiEndpoint(currentUrl: string, targetPageNum: number, rawHtml?: string): string | null {
+    try {
+      const urlObj = new URL(currentUrl);
+      const html = (rawHtml || '').toLowerCase();
+      const pathname = urlObj.pathname;
+
+      // Shopify store API detection
+      const isShopify = html.includes('cdn.shopify.com') || html.includes('shopify.') || pathname.includes('/collections/');
+      if (isShopify) {
+        const colMatch = pathname.match(/\/collections\/([a-zA-Z0-9_-]+)/i);
+        if (colMatch) {
+          const colHandle = colMatch[1];
+          return `${urlObj.origin}/collections/${colHandle}/products.json?page=${targetPageNum}&limit=50`;
+        }
+        return `${urlObj.origin}/products.json?page=${targetPageNum}&limit=50`;
+      }
+
+      // WooCommerce store pagination
+      const isWoo = html.includes('wp-content') || html.includes('woocommerce');
+      if (isWoo) {
+        const wooUrl = new URL(currentUrl);
+        wooUrl.searchParams.set('paged', String(targetPageNum));
+        return wooUrl.href;
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * Constructs candidate pagination URL as fallback for infinite scroll simulation
+   */
+  private constructFallbackPageUrl(baseUrl: string, pageNum: number, rawHtml?: string): string | null {
+    try {
+      const urlObj = new URL(baseUrl);
+      // Check platform API
+      const api = this.detectStoreApiEndpoint(baseUrl, pageNum, rawHtml);
+      if (api) return api;
+
+      if (urlObj.searchParams.has('p')) {
+        urlObj.searchParams.set('p', String(pageNum));
+      } else {
+        urlObj.searchParams.set('page', String(pageNum));
+      }
+      return urlObj.href;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Parses JSON product streams (e.g. from Shopify /products.json or WooCommerce Store API)
+   */
+  private parseJsonProducts(jsonText: string, sourceUrl: string): ExtractedProduct[] {
+    const products: ExtractedProduct[] = [];
+    try {
+      const data = JSON.parse(jsonText);
+      const rawList: any[] = Array.isArray(data) 
+        ? data 
+        : (data.products || data.items || data.data || data.results || []);
+
+      for (let i = 0; i < rawList.length; i++) {
+        const item = rawList[i];
+        if (!item || typeof item !== 'object') continue;
+
+        const title = item.title || item.name || item.product_name || '';
+        if (!title || title.length < 2) continue;
+
+        // Price extraction
+        let price = 0;
+        let originalPrice: number | undefined = undefined;
+        let currency = 'EGP';
+
+        if (item.variants && Array.isArray(item.variants) && item.variants[0]) {
+          const v = item.variants[0];
+          price = parseFloat(v.price) || 0;
+          if (v.compare_at_price) {
+            const comp = parseFloat(v.compare_at_price);
+            if (comp > price) originalPrice = comp;
+          }
+        } else if (item.prices) {
+          price = parseFloat(item.prices.price || item.prices.regular_price) / 100 || 0;
+          currency = item.prices.currency_code || 'EGP';
+        } else if (item.price !== undefined) {
+          price = typeof item.price === 'number' ? item.price : parseFloat(item.price) || 0;
+          if (item.compare_at_price || item.original_price) {
+            const comp = parseFloat(item.compare_at_price || item.original_price);
+            if (comp > price) originalPrice = comp;
+          }
+        }
+
+        // Image extraction
+        let image = '';
+        if (item.images && Array.isArray(item.images) && item.images.length > 0) {
+          const imgObj = item.images[0];
+          image = typeof imgObj === 'string' ? imgObj : (imgObj.src || imgObj.url || '');
+        } else if (item.image) {
+          image = typeof item.image === 'string' ? item.image : (item.image.src || item.image.url || '');
+        } else if (item.featured_image) {
+          image = typeof item.featured_image === 'string' ? item.featured_image : (item.featured_image.src || '');
+        }
+
+        // Product URL
+        let url = sourceUrl;
+        if (item.handle) {
+          try {
+            const u = new URL(sourceUrl);
+            url = `${u.origin}/products/${item.handle}`;
+          } catch {}
+        } else if (item.permalink || item.url) {
+          url = item.permalink || item.url;
+        }
+
+        products.push({
+          id: `prod_api_${Date.now()}_${i}`,
+          title: title.trim(),
+          price: price || 99,
+          originalPrice,
+          currency: currency || 'EGP',
+          mainImage: image || '/placeholder-product.svg',
+          galleryImages: image ? [image] : [],
+          productUrl: url,
+          specs: {},
+          brand: item.vendor || item.brand || undefined,
+          category: item.product_type || item.category || undefined,
+          inStock: item.available !== false,
+          description: typeof item.body_html === 'string' ? item.body_html.replace(/<[^>]+>/g, '').trim().substring(0, 200) : undefined,
+          rating: item.rating ? parseFloat(item.rating) : undefined
+        });
+      }
+    } catch {}
+    return products;
+  }
+
+  private getProductDeduplicationKey(p: ExtractedProduct): string {
+    return `${p.title.trim().toLowerCase()}_${p.price}`;
   }
 
   private deduplicateProducts(products: ExtractedProduct[]): ExtractedProduct[] {

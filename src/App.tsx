@@ -23,7 +23,7 @@ import {
   AlertCircle,
   RefreshCw
 } from 'lucide-react';
-import { globalApexScraperService } from './services/apexScraperService.ts';
+import { globalApexScraperService } from './services/apexScraperService';
 
 export default function App() {
   const [lang, setLang] = useState<'ar' | 'en'>('ar');
@@ -41,7 +41,9 @@ export default function App() {
     cleanData: true,
     respectRobots: false,
     userAgentType: 'rotate_all',
-    maxPages: 25,
+    paginationMode: 'first_n_pages',
+    maxPages: 5,
+    maxCatalogPages: 5,
     crawlAllProductPages: true,
     crawlAllStorePages: true,
     timeoutMs: 30000,

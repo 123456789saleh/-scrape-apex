@@ -51,7 +51,7 @@ import {
   PresetSite,
   CrawlDepthLevel,
   ExtractionFieldsConfig
-} from '../types/scraper.ts';
+} from '../types/scraper';
 
 interface InputPanelProps {
   config: ScrapeConfig;
@@ -762,21 +762,173 @@ export const InputPanel: React.FC<InputPanelProps> = ({
 
           {/* E-Commerce Specific Multi-Page & Scroll Options (When Ecommerce Mode is Selected) */}
           {(config.mode === 'ecommerce' || config.mode === 'auto') && (
-            <div className="mt-3 p-3.5 rounded-xl bg-[#00D9FF]/10 border border-[#00D9FF]/30 space-y-2">
-              <div className="flex items-center justify-between text-xs font-bold text-[#00D9FF]">
+            <div className="mt-3 p-4 rounded-xl bg-gradient-to-b from-[#00D9FF]/10 via-[#0F1419] to-[#0F1419] border border-[#00D9FF]/30 space-y-3.5 shadow-md">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-[#00D9FF]/20 pb-2.5">
                 <div className="flex items-center gap-2">
-                  <ShoppingBag className="w-4 h-4" />
-                  <span>{isAr ? 'خيارات سحب جميع منتجات المتاجر الإلكترونية والصفحات المتعاقبة:' : 'E-Commerce All Pages & Infinite Scroll Extraction:'}</span>
+                  <div className="p-1.5 rounded-lg bg-[#00D9FF]/20 text-[#00D9FF]">
+                    <Layers className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-white block">
+                      {isAr ? 'التحكم بعدد الصفحات المطلوب سحبها (Pagination & Infinite Scroll):' : 'Number of Pages to Crawl (Pagination & Infinite Scroll):'}
+                    </span>
+                    <span className="text-[10px] text-[#94A3B8]">
+                      {isAr ? 'يدعم كشف الترقيم الآلي (?p=, ?page=) والتمرير التلقائي واستدعاء الـ APIs' : 'Supports auto pagination links & infinite scroll APIs'}
+                    </span>
+                  </div>
                 </div>
-                <span className="text-[11px] px-2 py-0.5 rounded bg-[#00D9FF]/20 text-[#00D9FF] border border-[#00D9FF]/30 font-mono font-bold">
-                  {isAr ? 'سحب صفحة 1..2..N + قاع الصفحة (Scroll)' : 'Pages 1..2..N + Scroll'}
-                </span>
+                <div className="flex items-center gap-1.5 self-end sm:self-center">
+                  <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-[#00D9FF]/15 text-[#00D9FF] border border-[#00D9FF]/40 font-mono font-bold">
+                    {config.paginationMode === 'single_page' 
+                      ? (isAr ? 'صفحة واحدة فقط' : 'Single Page (1x)')
+                      : config.paginationMode === 'auto_all_pages'
+                        ? (isAr ? 'كافة الصفحات ♾️' : 'All Available ♾️')
+                        : (isAr ? `أول ${config.maxPages || 5} صفحات` : `First ${config.maxPages || 5} Pages`)}
+                  </span>
+                </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-1">
-                <label className="flex items-center gap-2 text-xs text-[#E2E8F0] cursor-pointer bg-[#0F1419]/60 p-2 rounded-lg border border-[#00D9FF]/20 hover:border-[#00D9FF]/40 transition-colors">
+
+              {/* 3 Core Selection Options: Single Page / First 5 Pages / All Available Pages */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {/* 1. Current Page Only */}
+                <button
+                  type="button"
+                  onClick={() => setConfig(prev => ({
+                    ...prev,
+                    paginationMode: 'single_page',
+                    maxPages: 1,
+                    maxCatalogPages: 1,
+                    crawlAllStorePages: false,
+                    crawlAllProductPages: false
+                  }))}
+                  className={`flex flex-col text-right p-3 rounded-xl border transition-all cursor-pointer relative overflow-hidden ${
+                    config.paginationMode === 'single_page' || config.maxPages === 1
+                      ? 'bg-gradient-to-r from-[#10B981]/20 to-[#0F1419] border-[#10B981] text-white shadow-sm ring-1 ring-[#10B981]/30'
+                      : 'bg-[#0F1419]/90 border-[#1E293B] text-[#94A3B8] hover:border-[#334155] hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold flex items-center gap-1.5">
+                      <FileText className={`w-3.5 h-3.5 ${config.paginationMode === 'single_page' || config.maxPages === 1 ? 'text-[#10B981]' : 'text-[#64748B]'}`} />
+                      {isAr ? 'سحب الصفحة الحالية فقط' : 'Current Page Only'}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#10B981]/20 text-[#10B981] font-mono font-bold">
+                      1 {isAr ? 'صفحة' : 'page'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-[#64748B] leading-relaxed">
+                    {isAr ? 'استخراج المنتجات والبيانات بالرابط المدخل فقط دون تتبع الروابط اللاحقة.' : 'Extract items on this exact URL without following pagination links.'}
+                  </p>
+                </button>
+
+                {/* 2. First 5 Pages */}
+                <button
+                  type="button"
+                  onClick={() => setConfig(prev => ({
+                    ...prev,
+                    paginationMode: 'first_n_pages',
+                    maxPages: 5,
+                    maxCatalogPages: 5,
+                    crawlAllStorePages: true,
+                    crawlAllProductPages: true,
+                    simulateFullScroll: true
+                  }))}
+                  className={`flex flex-col text-right p-3 rounded-xl border transition-all cursor-pointer relative overflow-hidden ${
+                    config.paginationMode === 'first_n_pages' || (config.maxPages === 5 && config.paginationMode !== 'auto_all_pages')
+                      ? 'bg-gradient-to-r from-[#00D9FF]/20 to-[#0F1419] border-[#00D9FF] text-white shadow-sm ring-1 ring-[#00D9FF]/30'
+                      : 'bg-[#0F1419]/90 border-[#1E293B] text-[#94A3B8] hover:border-[#334155] hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold flex items-center gap-1.5">
+                      <Layers className={`w-3.5 h-3.5 ${config.paginationMode === 'first_n_pages' || (config.maxPages === 5 && config.paginationMode !== 'auto_all_pages') ? 'text-[#00D9FF]' : 'text-[#64748B]'}`} />
+                      {isAr ? 'سحب أول 5 صفحات' : 'First 5 Pages'}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#00D9FF]/20 text-[#00D9FF] font-mono font-bold">
+                      {isAr ? 'سريع وموصى به' : 'Fast & Recommended'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-[#64748B] leading-relaxed">
+                    {isAr ? 'سحب تجميعي سريع لأول 5 صفحات مع محاكاة التمرير ودمج كافة المنتجات.' : 'Crawl first 5 pages with scroll simulation & merge into one dataset.'}
+                  </p>
+                </button>
+
+                {/* 3. All Available Pages */}
+                <button
+                  type="button"
+                  onClick={() => setConfig(prev => ({
+                    ...prev,
+                    paginationMode: 'auto_all_pages',
+                    maxPages: 50,
+                    maxCatalogPages: 50,
+                    crawlAllStorePages: true,
+                    crawlAllProductPages: true,
+                    simulateFullScroll: true
+                  }))}
+                  className={`flex flex-col text-right p-3 rounded-xl border transition-all cursor-pointer relative overflow-hidden ${
+                    config.paginationMode === 'auto_all_pages' || (config.maxPages && config.maxPages >= 25 && config.paginationMode !== 'first_n_pages')
+                      ? 'bg-gradient-to-r from-[#8B5CF6]/25 to-[#0F1419] border-[#8B5CF6] text-white shadow-sm ring-1 ring-[#8B5CF6]/30'
+                      : 'bg-[#0F1419]/90 border-[#1E293B] text-[#94A3B8] hover:border-[#334155] hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold flex items-center gap-1.5">
+                      <InfinityIcon className={`w-3.5 h-3.5 ${config.paginationMode === 'auto_all_pages' || (config.maxPages && config.maxPages >= 25 && config.paginationMode !== 'first_n_pages') ? 'text-[#A78BFA]' : 'text-[#64748B]'}`} />
+                      {isAr ? 'سحب كافة الصفحات المتاحة' : 'All Available Pages'}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#8B5CF6]/20 text-[#C4B5FD] font-mono font-bold">
+                      {isAr ? 'شامل وغير محدود ♾️' : 'Full Catalog ♾️'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-[#64748B] leading-relaxed">
+                    {isAr ? 'زحف آلي مستمر يتبع كل أزرار التالي وروابط الترقيم والـ Infinite Scroll حتى نهاية المتجر.' : 'Continuous crawler following pagination links & dynamic infinite scroll.'}
+                  </p>
+                </button>
+              </div>
+
+              {/* Secondary Options: Custom Pages Count + Infinite Scroll Toggles */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-1 border-t border-[#1E293B]/80">
+                <div className="flex items-center justify-between gap-2 text-xs text-[#E2E8F0] bg-[#0F1419]/80 p-2 rounded-lg border border-[#00D9FF]/20">
+                  <span className="text-[#94A3B8] text-[11px]">{isAr ? 'تخصيص أقصى صفحات:' : 'Custom Max Pages:'}</span>
+                  <select
+                    value={config.maxPages || 5}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      setConfig(prev => ({
+                        ...prev,
+                        maxPages: val,
+                        maxCatalogPages: val,
+                        paginationMode: val === 1 ? 'single_page' : (val <= 5 ? 'first_n_pages' : 'auto_all_pages'),
+                        crawlAllStorePages: val > 1
+                      }));
+                    }}
+                    className="bg-[#161F2E] border border-[#334155] rounded px-2 py-1 text-xs text-[#00D9FF] font-bold focus:outline-none cursor-pointer"
+                  >
+                    <option value={1}>1 {isAr ? 'صفحة (الحالية فقط)' : 'Page (Current only)'}</option>
+                    <option value={2}>2 {isAr ? 'صفحتين' : 'Pages'}</option>
+                    <option value={3}>3 {isAr ? 'صفحات' : 'Pages'}</option>
+                    <option value={5}>5 {isAr ? 'صفحات (سريع)' : 'Pages (Fast)'}</option>
+                    <option value={10}>10 {isAr ? 'صفحات' : 'Pages'}</option>
+                    <option value={20}>20 {isAr ? 'صفحة' : 'Pages'}</option>
+                    <option value={50}>50 {isAr ? 'صفحة (شامل)' : 'Pages (Deep)'}</option>
+                    <option value={100}>100 {isAr ? 'صفحة (أقصى عمق)' : 'Pages (Max Depth)'}</option>
+                  </select>
+                </div>
+
+                <label className="flex items-center gap-2 text-xs text-[#E2E8F0] cursor-pointer bg-[#0F1419]/80 p-2 rounded-lg border border-[#00D9FF]/20 hover:border-[#00D9FF]/40 transition-colors">
                   <input
                     type="checkbox"
-                    checked={config.crawlAllStorePages !== false && config.crawlAllProductPages !== false}
+                    checked={config.simulateFullScroll ?? true}
+                    onChange={(e) => setConfig(prev => ({ ...prev, simulateFullScroll: e.target.checked }))}
+                    className="accent-[#00D9FF] rounded"
+                  />
+                  <span className="text-[11px]">{isAr ? 'سحب المنتجات بأسفل الصفحات (Scroll / Lazy Load)' : 'Capture Scroll & Lazy Loaded Products'}</span>
+                </label>
+
+                <label className="flex items-center gap-2 text-xs text-[#E2E8F0] cursor-pointer bg-[#0F1419]/80 p-2 rounded-lg border border-[#00D9FF]/20 hover:border-[#00D9FF]/40 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={config.crawlAllStorePages !== false}
                     onChange={(e) => setConfig(prev => ({ 
                       ...prev, 
                       crawlAllStorePages: e.target.checked,
@@ -784,34 +936,12 @@ export const InputPanel: React.FC<InputPanelProps> = ({
                     }))}
                     className="accent-[#00D9FF] rounded"
                   />
-                  <span className="font-medium">{isAr ? 'سحب كل صفحات المتجر (صفحة 1..2 إلى آخر صفحة)' : 'Crawl All Pages (1..2 to Last)'}</span>
+                  <span className="text-[11px] font-medium">{isAr ? 'تتبع أزرار التالي (.next / pagination)' : 'Follow next buttons (.next / pagination)'}</span>
                 </label>
-                <label className="flex items-center gap-2 text-xs text-[#E2E8F0] cursor-pointer bg-[#0F1419]/60 p-2 rounded-lg border border-[#00D9FF]/20 hover:border-[#00D9FF]/40 transition-colors">
-                  <input
-                    type="checkbox"
-                    checked={config.simulateFullScroll ?? true}
-                    onChange={(e) => setConfig(prev => ({ ...prev, simulateFullScroll: e.target.checked }))}
-                    className="accent-[#00D9FF] rounded"
-                  />
-                  <span>{isAr ? 'سحب المنتجات بأسفل الصفحات (Scroll / Lazy Load)' : 'Capture Scroll & Lazy Loaded Products'}</span>
-                </label>
-                <div className="flex items-center gap-2 text-xs text-[#E2E8F0] bg-[#0F1419]/60 p-2 rounded-lg border border-[#00D9FF]/20">
-                  <span className="text-[#94A3B8]">{isAr ? 'أقصى عدد صفحات:' : 'Max Pages:'}</span>
-                  <select
-                    value={config.maxPages || 25}
-                    onChange={(e) => setConfig(prev => ({ ...prev, maxPages: parseInt(e.target.value, 10), maxCatalogPages: parseInt(e.target.value, 10) }))}
-                    className="bg-[#161F2E] border border-[#334155] rounded px-2 py-0.5 text-xs text-[#00D9FF] font-bold focus:outline-none cursor-pointer"
-                  >
-                    <option value={5}>5 {isAr ? 'صفحات' : 'pages'}</option>
-                    <option value={10}>10 {isAr ? 'صفحات' : 'pages'}</option>
-                    <option value={25}>25 {isAr ? 'صفحة (افتراضي)' : 'pages (Default)'}</option>
-                    <option value={50}>50 {isAr ? 'صفحة' : 'pages'}</option>
-                    <option value={100}>100 {isAr ? 'صفحة (شامل)' : 'pages (All)'}</option>
-                  </select>
-                </div>
-                <div className="flex items-center gap-1.5 text-[11px] text-[#94A3B8] bg-[#0F1419]/60 p-2 rounded-lg border border-[#00D9FF]/20">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981] flex-shrink-0" />
-                  <span>{isAr ? 'تفريغ الـ noscript والـ template تلقائياً' : 'Auto unrolls noscript & template'}</span>
+
+                <div className="flex items-center gap-1.5 text-[11px] text-[#10B981] bg-[#0F1419]/80 p-2 rounded-lg border border-[#00D9FF]/20">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981] shrink-0" />
+                  <span>{isAr ? 'فحص الـ APIs الخلفية ودمج المنتجات تلقائياً' : 'Auto detects background APIs & merges'}</span>
                 </div>
               </div>
             </div>
@@ -1299,15 +1429,24 @@ export const InputPanel: React.FC<InputPanelProps> = ({
 
               <div>
                 <label className="block text-xs font-medium text-[#94A3B8] mb-1.5 flex justify-between">
-                  <span>{isAr ? 'عدد الصفحات المستهدفة للتنقل' : 'Pagination Pages Count'}</span>
-                  <span className="text-[#00D9FF] font-bold">{config.maxPages || 1} صفحة</span>
+                  <span>{isAr ? 'عدد الصفحات المستهدفة للتنقل (حتى 50 صفحة)' : 'Pagination Pages Count (up to 50)'}</span>
+                  <span className="text-[#00D9FF] font-bold">{config.maxPages || 1} {isAr ? 'صفحة' : 'pages'}</span>
                 </label>
                 <input
                   type="range"
                   min="1"
-                  max="10"
+                  max="50"
                   value={config.maxPages || 1}
-                  onChange={(e) => setConfig(prev => ({ ...prev, maxPages: parseInt(e.target.value) }))}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setConfig(prev => ({
+                      ...prev,
+                      maxPages: val,
+                      maxCatalogPages: val,
+                      paginationMode: val === 1 ? 'single_page' : (val <= 5 ? 'first_n_pages' : 'auto_all_pages'),
+                      crawlAllStorePages: val > 1
+                    }));
+                  }}
                   className="w-full accent-[#00D9FF]"
                 />
               </div>
