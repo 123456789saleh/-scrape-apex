@@ -16,64 +16,109 @@ import { getCategoryFallbackImage } from '../lib/productImages.ts';
 
 // Client-Side Scraping & Parsing Engine (Vercel Serverless / Direct Browser Hybrid)
 export class ClientScraperEngine {
-  private corsProxies = [
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+  private corsProxies: Array<{ name: string; getUrl: (url: string) => string; isJsonWrapper?: boolean }> = [
+    {
+      name: 'corsproxy.io (Direct Query)',
+      getUrl: (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`
+    },
+    {
+      name: 'corsproxy.io (Param Format)',
+      getUrl: (url: string) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`
+    },
+    {
+      name: 'AllOrigins (Raw API)',
+      getUrl: (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
+    },
+    {
+      name: 'AllOrigins (JSON Wrapper)',
+      getUrl: (url: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+      isJsonWrapper: true
+    },
+    {
+      name: 'Vercel / Local HTML Proxy',
+      getUrl: (url: string) => `/api/proxy-html?url=${encodeURIComponent(url)}`
+    },
+    {
+      name: 'CodeTabs CORS Proxy',
+      getUrl: (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+    },
+    {
+      name: 'ThingProxy Freeboard',
+      getUrl: (url: string) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`
+    }
   ];
 
   /**
-   * Fetches raw HTML directly from browser or through resilient CORS proxies
+   * Fetches raw HTML automatically via resilient free CORS proxies to bypass browser CORS blocks
    */
   public async fetchHtml(targetUrl: string): Promise<{ html: string; status: number; method: string }> {
-    // 1. Try direct fetch first
-    try {
-      const resp = await fetch(targetUrl, {
-        headers: {
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    // 1. If target is same-origin (e.g. testing local files), fetch directly
+    if (typeof window !== 'undefined') {
+      try {
+        const targetOrigin = new URL(targetUrl).origin;
+        if (targetOrigin === window.location.origin) {
+          const resp = await fetch(targetUrl);
+          if (resp.ok) {
+            const text = await resp.text();
+            if (text && text.length > 100) {
+              return { html: text, status: resp.status, method: 'Direct (Same-Origin)' };
+            }
+          }
         }
-      });
+      } catch {
+        // Continue to CORS proxies
+      }
+    }
+
+    // 2. Automatically cycle through free public CORS proxies with fast failover
+    for (const proxy of this.corsProxies) {
+      try {
+        const proxyUrl = proxy.getUrl(targetUrl);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 7500);
+
+        const resp = await fetch(proxyUrl, {
+          signal: controller.signal,
+          headers: {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          }
+        });
+        clearTimeout(timeoutId);
+
+        if (resp.ok) {
+          if (proxy.isJsonWrapper) {
+            const data = await resp.json();
+            const content = data?.contents;
+            if (content && typeof content === 'string' && content.length > 150) {
+              return { html: content, status: 200, method: proxy.name };
+            }
+          } else {
+            const text = await resp.text();
+            // Verify valid HTML and not a proxy API error response
+            if (text && text.length > 150 && !text.startsWith('{"error":')) {
+              return { html: text, status: resp.status, method: proxy.name };
+            }
+          }
+        }
+      } catch {
+        // Fast-fail to next proxy in pipeline
+      }
+    }
+
+    // 3. Fallback: attempt direct fetch as last resort (in case domain has CORS or browser extension is installed)
+    try {
+      const resp = await fetch(targetUrl);
       if (resp.ok) {
         const text = await resp.text();
-        if (text && text.length > 200) {
-          return { html: text, status: resp.status, method: 'direct_browser' };
+        if (text && text.length > 150) {
+          return { html: text, status: resp.status, method: 'Direct Fetch (CORS Unrestricted)' };
         }
       }
     } catch {
-      // Direct CORS blocked, proceed to CORS proxies
+      // Direct CORS blocked
     }
 
-    // 2. Fall back through verified CORS proxies
-    for (let i = 0; i < this.corsProxies.length; i++) {
-      try {
-        const proxyUrl = this.corsProxies[i](targetUrl);
-        const resp = await fetch(proxyUrl);
-        if (resp.ok) {
-          const text = await resp.text();
-          if (text && text.length > 200) {
-            return { html: text, status: 200, method: `client_cors_proxy_${i + 1}` };
-          }
-        }
-      } catch (err) {
-        console.warn(`[ClientScraper] Proxy ${i + 1} failed:`, err);
-      }
-    }
-
-    // 3. Fall back to allorigins JSON wrapper
-    try {
-      const jsonProxy = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-      const res = await fetch(jsonProxy);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.contents && data.contents.length > 200) {
-          return { html: data.contents, status: 200, method: 'allorigins_json_wrapper' };
-        }
-      }
-    } catch (e) {
-      console.warn('[ClientScraper] AllOrigins JSON wrapper failed:', e);
-    }
-
-    throw new Error('تعذر الوصول إلى الموقع المستهدف من المتصفح مباشرة (CORS). يرجى التأكد من الرابط أو استخدام Vercel Serverless Function.');
+    throw new Error('تعذر جلب محتوى الموقع عبر بروكسيات CORS المجانية المتاحة (corsproxy.io و allorigins). يرجى التحقق من الرابط أو التبديل إلى نمط Vercel Serverless Function.');
   }
 
   /**
@@ -98,7 +143,7 @@ export class ClientScraperEngine {
     if (onProgress) onProgress(15, 1, config.maxPages || 1, 0);
 
     const { html, status, method } = await this.fetchHtml(config.url);
-    addLog('success', `تم جلب كود الصفحة بنجاح عبر: ${method} (${(html.length / 1024).toFixed(1)} KB)`);
+    addLog('success', `تم تجاوز قيود CORS وجلب كود الصفحة بنجاح عبر: ${method} (${(html.length / 1024).toFixed(1)} KB)`);
 
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');

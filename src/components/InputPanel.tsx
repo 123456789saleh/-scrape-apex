@@ -674,7 +674,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({
                   {isAr ? 'مباشر من المتصفح (Client-Side)' : 'Direct In-Browser (100% Client)'}
                 </div>
                 <div className="text-[10px] text-[#64748B] mt-0.5">
-                  {isAr ? 'بدون أي سيرفر عبر متصفحك مباشرة' : 'Zero Server Needed (DOMParser)'}
+                  {isAr ? 'بروكسيات CORS تلقائية مجانية (corsproxy / allorigins)' : 'Auto Free CORS Proxies (corsproxy / allorigins)'}
                 </div>
               </div>
             </button>

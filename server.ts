@@ -69,6 +69,46 @@ async function startServer() {
     }
   });
 
+  // Resilient HTML Proxy for Client-side scraping without CORS restrictions
+  app.get('/api/proxy-html', async (req, res) => {
+    try {
+      const rawUrl = req.query.url as string;
+      if (!rawUrl) {
+        return res.status(400).send('URL query parameter is required');
+      }
+
+      const decodedUrl = decodeURIComponent(rawUrl);
+      let parsed: URL;
+      try {
+        parsed = new URL(decodedUrl);
+      } catch {
+        return res.status(400).send('Invalid URL format');
+      }
+
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return res.status(400).send('Invalid protocol');
+      }
+
+      const upstreamResponse = await fetch(decodedUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+          'Referer': `${parsed.protocol}//${parsed.host}/`
+        }
+      });
+
+      const html = await upstreamResponse.text();
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.status(upstreamResponse.status).send(html);
+    } catch (err: any) {
+      res.status(502).send('HTML Proxy error: ' + err.message);
+    }
+  });
+
   // Session Management Routes (Binding Standard: Absolute Session Isolation)
   app.post('/api/session/create', (req, res) => {
     const { email, url, sessionId, tenantId } = req.body;
