@@ -191,31 +191,43 @@ export class ClientScraperEngine {
       media.push(...this.extractMedia(doc, config.url));
     }
 
-    // 8. Extract Links & Pagination Discovery
-    const { links, nextUrl } = this.extractLinks(doc, config.url);
+    // 8. Extract Links & Automated Pagination Discovery (Virtual Scroll Simulation)
+    const { links } = this.extractLinks(doc, config.url);
+    const firstNextUrl = this.determineNextPageUrl(doc, config.url, 1);
 
-    // Multi-page crawling client-side if requested
-    const maxPagesToCrawl = Math.min(config.maxPages || 1, 5);
-    if (nextUrl && maxPagesToCrawl > 1) {
-      addLog('info', `اكتشاف رابط الصفحة التالية: ${nextUrl} - بدء سحب الصفحات المتبقية...`);
-      let currentNext: string | null = nextUrl;
+    // Multi-page crawling & Virtual Scroll Simulation client-side
+    // Determine maximum pages to crawl: respects config.maxPages or defaults to 3 pages if store has pagination
+    const maxPagesToCrawl = Math.max(1, Math.min(config.maxPages || (firstNextUrl ? 3 : 1), 10));
+
+    if (firstNextUrl && maxPagesToCrawl > 1) {
+      addLog('info', `[الترقيم والتمرير التلقائي] اكتشاف وجود صفحات إضافية: ${firstNextUrl} - بدء محاكاة التمرير وسحب كافة الصفحات...`);
+      let currentNext: string | null = firstNextUrl;
       let pageNum = 2;
+      const crawledUrls = new Set<string>([config.url]);
 
       while (currentNext && pageNum <= maxPagesToCrawl) {
+        if (crawledUrls.has(currentNext)) break;
+        crawledUrls.add(currentNext);
+
         try {
           if (onProgress) {
             const pct = Math.round((pageNum / maxPagesToCrawl) * 100);
             onProgress(pct, pageNum, maxPagesToCrawl, products.length + emails.length);
           }
-          addLog('info', `سحب الصفحة رقم ${pageNum}...`);
+          addLog('info', `[محاكاة التمرير اللانهائي] جلب وتحليل الصفحة رقم ${pageNum}...`);
           const nextFetch = await this.fetchHtml(currentNext);
           const nextDoc = parser.parseFromString(nextFetch.html, 'text/html');
           const nextJsonLd = this.extractJsonLd(nextDoc);
 
-          if (config.mode === 'ecommerce' || config.mode === 'auto') {
+          let newProductsCount = 0;
+          if (config.mode === 'ecommerce' || config.mode === 'auto' || config.mode === 'ai_semantic') {
             const nextProds = this.extractProductsFromDoc(nextDoc, currentNext, nextJsonLd.products);
+            const prevCount = products.length;
             products.push(...nextProds);
-            addLog('info', `تم إضافة ${nextProds.length} منتج من الصفحة ${pageNum}`);
+            newProductsCount = products.length - prevCount;
+            if (newProductsCount > 0) {
+              addLog('success', `[الصفحة ${pageNum}] تم استخراج ${newProductsCount} منتج إضافي (إجمالي المنتجات المجمعة: ${products.length})`);
+            }
           }
 
           if (config.mode === 'emails' || config.mode === 'auto') {
@@ -223,11 +235,17 @@ export class ClientScraperEngine {
             emails.push(...nextEmailRes.emails);
           }
 
-          const nextLinks = this.extractLinks(nextDoc, currentNext);
-          currentNext = nextLinks.nextUrl && nextLinks.nextUrl !== currentNext ? nextLinks.nextUrl : null;
+          // If a candidate page returned 0 new products, stop pagination gracefully
+          if (newProductsCount === 0 && pageNum > 2) {
+            addLog('info', `[اكتمال التمرير] انتهت منتجات المتجر عند الصفحة ${pageNum - 1}.`);
+            break;
+          }
+
+          // Determine next page URL for pageNum + 1
+          currentNext = this.determineNextPageUrl(nextDoc, currentNext, pageNum);
           pageNum++;
         } catch (e) {
-          addLog('warn', `توقف السحب المتعدد عند الصفحة ${pageNum}: ${(e as any).message}`);
+          addLog('warn', `توقف التمرير التلقائي عند الصفحة ${pageNum}: ${(e as any).message}`);
           break;
         }
       }
@@ -511,38 +529,99 @@ export class ClientScraperEngine {
       });
     }
 
-    // 3. Generic DOM Selectors for Product Cards across ALL global & Arabic platforms
-    const productCardSelectors = [
-      // Standard E-commerce
+    // 3. Multi-Item DOM Extraction: Collect ALL cards across general rules without stopping at the first selector
+    const generalCardSelectors = [
+      '.product-item',
+      '.product-card',
+      '.grid-item',
+      '[class*="product-card"]',
+      '[class*="product-item"]',
+      '[class*="product_card"]',
+      '[class*="product_item"]',
+      '.woocommerce-loop-product__link',
+      '.wc-block-grid__product',
+      'li.product',
+      '.grid-view-item',
+      '.card--standard',
+      '.product-block',
+      '.s-product-card',
+      '.s-product-card-vertical',
+      '.s-result-item[data-asin]',
+      '.card-product',
+      '.product-box',
+      '.item-product',
+      '.product-inner',
+      '.products-grid .item',
+      '.catalog-item',
+      '.listing-item',
+      '.product_pod',
+      'article.product',
+      '.shop-item',
+      '.goods-item',
       '[itemtype*="schema.org/Product"]',
-      '.product-item', '.product-card', '.product', '[data-product-id]', '[data-sku]', '[data-item-id]',
-      // Platforms (WooCommerce, Shopify, Magento, Salla, Zid, Amazon, Jumia, Noon)
-      '.woocommerce-loop-product__link', '.wc-block-grid__product', 'li.product',
-      '.grid-view-item', '.card--standard', '.product-block',
-      '.s-product-card', '.s-product-card-vertical',
-      '.s-result-item[data-asin]', '.card-product', '.product-box', '.item-product',
-      '.product-inner', '.products-grid .item', '.catalog-item', '.listing-item',
-      '.product_pod', 'article.product', '.shop-item', '.goods-item'
+      '[data-product-id]',
+      '[data-sku]',
+      '[data-item-id]',
+      '[class*="product"]',
+      '[class*="item"]'
     ];
 
-    let matchedCards: Element[] = [];
-    for (const sel of productCardSelectors) {
-      const elements = Array.from(doc.querySelectorAll(sel));
-      if (elements.length >= 2) {
-        matchedCards = elements;
-        break;
+    const rawCandidates: Element[] = [];
+    const seenElements = new Set<Element>();
+
+    for (const sel of generalCardSelectors) {
+      try {
+        const elements = doc.querySelectorAll(sel);
+        elements.forEach(el => {
+          if (!seenElements.has(el)) {
+            seenElements.add(el);
+            rawCandidates.push(el);
+          }
+        });
+      } catch {
+        // Skip invalid selector if any
       }
     }
 
-    // Automatic fallback for repetitive product containers
+    // Filter down to valid product card containers
+    const filteredCards = rawCandidates.filter(card => {
+      if (card.tagName === 'BODY' || card.tagName === 'HTML' || card.tagName === 'MAIN' || (card.tagName === 'SECTION' && card.children.length > 25)) {
+        return false;
+      }
+      if (card.closest('header, footer, nav, #header, #footer, .site-header, .site-footer')) {
+        return false;
+      }
+      const text = card.textContent || '';
+      if (text.length < 10 || text.length > 2500) return false;
+
+      const hasPrice = /(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€|\bLE\b|\bL\.E\b)\s*[\d,]+|[\d,]+\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€)/i.test(text) ||
+                       card.querySelector('[class*="price"], [itemprop="price"], [data-price]') !== null;
+      
+      const hasImg = card.querySelector('img, [data-src], [data-lazy-src], picture') !== null;
+      const hasTitle = card.querySelector('h1, h2, h3, h4, h5, [class*="title"], [class*="name"], a[title]') !== null ||
+                       (card.tagName === 'A' && ((card as HTMLElement).title || text.length > 5));
+
+      return hasPrice && (hasImg || hasTitle);
+    });
+
+    // Remove nested children if the parent container is already a matched product card
+    let matchedCards: Element[] = [];
+    filteredCards.forEach(card => {
+      const isChildOfAnother = filteredCards.some(other => other !== card && other.contains(card));
+      if (!isChildOfAnother) {
+        matchedCards.push(card);
+      }
+    });
+
+    // Fallback extraction: if still empty, do a full-DOM sweep of all divs, lis, and articles
     if (matchedCards.length === 0) {
       const allDivs = Array.from(doc.querySelectorAll('div, li, article, section'));
       matchedCards = allDivs.filter(el => {
         const text = el.textContent || '';
         const hasPrice = /(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€|\bLE\b|\bL\.E\b)\s*[\d,]+|[\d,]+\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ)/i.test(text);
-        const hasImg = el.querySelector('img') !== null;
-        return hasPrice && hasImg && text.length > 15 && text.length < 600;
-      }).slice(0, 60);
+        const hasImg = el.querySelector('img, [data-src]') !== null;
+        return hasPrice && hasImg && text.length > 15 && text.length < 800;
+      }).slice(0, 100);
     }
 
     matchedCards.forEach((card, idx) => {
@@ -823,6 +902,90 @@ export class ClientScraperEngine {
     });
 
     return { links: links.slice(0, 150), nextUrl };
+  }
+
+  /**
+   * Discovers the next page URL via DOM links, query parameter progression, or virtual scroll simulation
+   */
+  private determineNextPageUrl(doc: Document, currentUrl: string, currentPageNum: number): string | null {
+    // 1. Rel next link tag or anchor
+    const relNext = doc.querySelector('link[rel="next"], a[rel="next"]')?.getAttribute('href');
+    if (relNext) {
+      try {
+        const resolved = new URL(relNext, currentUrl).href;
+        if (resolved !== currentUrl) return resolved;
+      } catch {}
+    }
+
+    // 2. Pagination DOM anchors with aria-label, class, or text
+    const anchors = Array.from(doc.querySelectorAll('a[href]'));
+    for (const a of anchors) {
+      const text = a.textContent?.trim().toLowerCase() || '';
+      const ariaLabel = (a.getAttribute('aria-label') || '').toLowerCase();
+      const href = a.getAttribute('href') || '';
+      const className = (a.getAttribute('class') || '').toLowerCase();
+
+      const isNextButton =
+        text === 'next' || text === 'التالي' || text === '›' || text === '»' ||
+        text.includes('next page') || text.includes('الصفحة التالية') ||
+        ariaLabel.includes('next') || ariaLabel.includes('التالي') ||
+        className.includes('next') || className.includes('pagination__next') || className.includes('page-next');
+
+      if (isNextButton && href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+        try {
+          const resolved = new URL(href, currentUrl).href;
+          if (resolved !== currentUrl) return resolved;
+        } catch {}
+      }
+
+      // Check numbered pagination anchor matching next page number (e.g. text "2")
+      const nextNumStr = String(currentPageNum + 1);
+      if (text === nextNumStr && href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+        try {
+          const resolved = new URL(href, currentUrl).href;
+          if (resolved !== currentUrl) return resolved;
+        } catch {}
+      }
+    }
+
+    // 3. Automated Query Parameter Progression (?page=2, ?p=2, ?pg=2, etc.)
+    try {
+      const urlObj = new URL(currentUrl);
+      const nextPageNum = currentPageNum + 1;
+
+      if (urlObj.searchParams.has('page')) {
+        urlObj.searchParams.set('page', String(nextPageNum));
+        return urlObj.href;
+      }
+      if (urlObj.searchParams.has('p')) {
+        urlObj.searchParams.set('p', String(nextPageNum));
+        return urlObj.href;
+      }
+      if (urlObj.searchParams.has('pg')) {
+        urlObj.searchParams.set('pg', String(nextPageNum));
+        return urlObj.href;
+      }
+      if (urlObj.searchParams.has('paged')) {
+        urlObj.searchParams.set('paged', String(nextPageNum));
+        return urlObj.href;
+      }
+
+      // Path-based pagination: /page/1 -> /page/2
+      const pathMatch = urlObj.pathname.match(/\/page\/(\d+)/i);
+      if (pathMatch) {
+        urlObj.pathname = urlObj.pathname.replace(/\/page\/\d+/i, `/page/${nextPageNum}`);
+        return urlObj.href;
+      }
+
+      // Virtual Scroll Simulation / Candidate for catalog pages on first page
+      if (currentPageNum === 1) {
+        const candidate = new URL(currentUrl);
+        candidate.searchParams.set('page', '2');
+        return candidate.href;
+      }
+    } catch {}
+
+    return null;
   }
 
   private deduplicateProducts(products: ExtractedProduct[]): ExtractedProduct[] {
