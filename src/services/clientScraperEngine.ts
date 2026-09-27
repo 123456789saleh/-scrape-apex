@@ -156,11 +156,11 @@ export class ClientScraperEngine {
     }
 
     // 3. Extract Products
-    const products: ExtractedProduct[] = [];
+    let products: ExtractedProduct[] = [];
     if (config.mode === 'ecommerce' || config.mode === 'auto' || config.mode === 'ai_semantic') {
       const extractedProducts = this.extractProductsFromDoc(doc, config.url, jsonLdData.products);
-      products.push(...extractedProducts);
-      addLog('success', `تم استخراج ${products.length} منتج متكامل بالأسعار والصور والماركة.`);
+      products = products.concat(extractedProducts);
+      addLog('success', `تم تفكيك واستخراج ${products.length} منتج فردي بالأسعار والصور والماركة من الصفحة.`);
     }
 
     // 4. Extract Emails & Contacts
@@ -268,24 +268,31 @@ export class ClientScraperEngine {
             }
           }
 
-          // 3. Deduplication and merging into the unified table
-          let freshAddedCount = 0;
-          for (const prod of newProductsFromThisPage) {
-            const key = this.getProductDeduplicationKey(prod);
-            if (!seenProductKeys.has(key)) {
+          // 3. Array Concat & Deduplication: ensure previous results are never erased and arrays are concatenated
+          if (newProductsFromThisPage.length > 0) {
+            const freshItems = newProductsFromThisPage.filter(prod => {
+              const key = this.getProductDeduplicationKey(prod);
+              if (seenProductKeys.has(key)) return false;
               seenProductKeys.add(key);
-              products.push(prod);
-              freshAddedCount++;
-            }
-          }
+              return true;
+            });
 
-          if (freshAddedCount > 0) {
-            consecutiveEmptyPages = 0;
-            addLog('success', `[صفحة ${pageNum}] تم دمج ${freshAddedCount} منتج إضافي بنجاح (المجموع التراكمي: ${products.length} منتج)`);
+            if (freshItems.length > 0) {
+              products = products.concat(freshItems);
+              consecutiveEmptyPages = 0;
+              addLog('success', `[دمج نتائج الصفحات - صفحة ${pageNum}] تم دمج ${freshItems.length} منتج جديد بنجاح عبر concat للمصفوفة الكلية (المجموع التراكمي: ${products.length} منتج).`);
+            } else {
+              consecutiveEmptyPages++;
+              addLog('info', `[صفحة ${pageNum}] كافة المنتجات في هذه الصفحة موجودة بالفعل ضمن النتائج.`);
+              if (consecutiveEmptyPages >= 2) {
+                addLog('info', `[اكتمال الكتالوج] توقف السحب التلقائي بعد استخلاص ${pageNum - 1} صفحة بنجاح.`);
+                break;
+              }
+            }
           } else {
             consecutiveEmptyPages++;
-            addLog('info', `[صفحة ${pageNum}] لم يتم العثور على منتجات جديدة (تكرار المنتجات أو الوصول لنهاية الكتالوج).`);
-            if (consecutiveEmptyPages >= 1) {
+            addLog('info', `[صفحة ${pageNum}] لم يتم العثور على منتجات جديدة.`);
+            if (consecutiveEmptyPages >= 2) {
               addLog('info', `[اكتمال الكتالوج] توقف السحب التلقائي بعد استخلاص ${pageNum - 1} صفحة بنجاح.`);
               break;
             }
@@ -396,6 +403,56 @@ export class ClientScraperEngine {
       }
 
       const type = (item['@type'] || '').toString();
+
+      // Check if schema is Organization, Brand, WebPage, Store, etc. (Non-product schemas)
+      const isNonProductSchema = (
+        type.includes('Organization') ||
+        type.includes('Brand') ||
+        type.includes('Corporation') ||
+        type.includes('LocalBusiness') ||
+        type.includes('Store') ||
+        type.includes('WebPage') ||
+        type.includes('WebSite') ||
+        type.includes('CollectionPage') ||
+        type.includes('SearchResultsPage') ||
+        type.includes('BreadcrumbList')
+      );
+
+      if (isNonProductSchema) {
+        // DO NOT add Organization / Brand / WebPage as a single product!
+        // Immediately inspect if it contains an ItemList or elements inside itemListElement
+        if (Array.isArray(item.itemListElement)) {
+          item.itemListElement.forEach((el: any) => {
+            if (el?.item && (el.item['@type']?.includes('Product') || el.item.name || el.item.offers)) {
+              products.push(el.item);
+            } else if (el?.name && (el?.offers || el?.image || el?.price || el['@type']?.includes('Product'))) {
+              products.push(el);
+            } else if (el && typeof el === 'object') {
+              traverse(el);
+            }
+          });
+        }
+        if (item.mainEntity) traverse(item.mainEntity);
+        if (item.hasOfferCatalog) traverse(item.hasOfferCatalog);
+        if (Array.isArray(item.offers)) item.offers.forEach(traverse);
+        return; // Skip adding this entity itself
+      }
+
+      // Check ItemList (e.g. Catalog listing schema)
+      if (type.includes('ItemList') && Array.isArray(item.itemListElement)) {
+        item.itemListElement.forEach((el: any) => {
+          if (el?.item && (el.item['@type']?.includes('Product') || el.item.name || el.item.offers)) {
+            products.push(el.item);
+          } else if (el?.name && (el?.offers || el?.image || el?.price || el['@type']?.includes('Product'))) {
+            products.push(el);
+          } else if (el && typeof el === 'object') {
+            traverse(el);
+          }
+        });
+        return;
+      }
+
+      // Check Product Schemas
       if (
         type.includes('Product') ||
         type.includes('IndividualProduct') ||
@@ -404,23 +461,12 @@ export class ClientScraperEngine {
         type.includes('Book')
       ) {
         products.push(item);
-      } else if (type.includes('ItemList') && Array.isArray(item.itemListElement)) {
-        item.itemListElement.forEach((el: any) => {
-          if (el?.item && (el.item['@type']?.includes('Product') || el.item.name || el.item.offers)) {
-            products.push(el.item);
-          } else if (el?.name && (el?.offers || el?.image)) {
-            products.push(el);
-          }
-        });
       } else if (type.includes('Article') || type.includes('NewsArticle') || type.includes('BlogPosting')) {
         articles.push(item);
       }
 
-      // Check nested offers or items
+      // Check nested offers or items only if not non-product schema
       if (item.mainEntity) traverse(item.mainEntity);
-      if (item.offers && !type.includes('Product') && item.name) {
-        products.push(item);
-      }
     };
 
     scripts.forEach(script => {
@@ -509,7 +555,7 @@ export class ClientScraperEngine {
       return 'منتجات المتجر';
     };
 
-    // 1. Process Smart Schema.org JSON-LD Products
+    // 1. Process Smart Schema.org JSON-LD Products (Each individual product separately)
     jsonLdProducts.forEach((ld, idx) => {
       const title = (ld.name || ld.title || '').toString().trim();
       if (!title || seenTitles.has(title)) return;
@@ -548,164 +594,168 @@ export class ClientScraperEngine {
       });
     });
 
-    // 2. OpenGraph & Meta Tags Product Extraction (Guarantees Single-Product extraction)
-    const ogTitle = doc.querySelector('meta[property="og:title"], meta[name="twitter:title"]')?.getAttribute('content')?.trim();
-    const ogImage = doc.querySelector('meta[property="og:image"], meta[name="twitter:image"], meta[property="og:image:secure_url"]')?.getAttribute('content')?.trim();
-    const ogPrice = doc.querySelector('meta[property="og:price:amount"], meta[property="product:price:amount"], meta[name="price"], meta[property="price:amount"]')?.getAttribute('content')?.trim();
-    const ogCurrency = doc.querySelector('meta[property="og:price:currency"], meta[property="product:price:currency"]')?.getAttribute('content')?.trim();
-
-    if (ogTitle && (ogPrice || ogImage) && !seenTitles.has(ogTitle)) {
-      const priceVal = ogPrice ? parseFloat(ogPrice.replace(/[^0-9.]/g, '')) : 0;
-      const brand = detectBrand(ogTitle);
-      const category = detectCategory(ogTitle);
-      const fallbackImage = getCategoryFallbackImage({ title: ogTitle, category, brand });
-
-      seenTitles.add(ogTitle);
-      products.push({
-        id: `p_og_${products.length + 1}`,
-        title: ogTitle,
-        price: priceVal,
-        currency: normalizeCurrency(ogCurrency, ogTitle),
-        brand,
-        category,
-        mainImage: ogImage || fallbackImage,
-        galleryImages: ogImage ? [ogImage] : [],
-        specs: {},
-        productUrl: doc.querySelector('link[rel="canonical"]')?.getAttribute('href') || baseUrl,
-        inStock: true,
-        rating: 4.9,
-        reviewsCount: 20,
-        displayOrder: products.length + 1
-      });
-    }
-
-    // 3. Multi-Item DOM Extraction: Collect ALL cards across general rules without stopping at the first selector
-    const generalCardSelectors = [
-      '.product-item',
+    // 2. Multi-Item DOM Extraction: Decompose the product listing into individual cards
+    // Supported selectors covering Magento, Shopify, WooCommerce, PrestaShop, Salla, Zid, Custom:
+    // li.item.product-item, .product-item-info, .product-card, .grid__item, article.product, [class*="product-card"]
+    const primaryCardSelectors = [
+      'li.item.product-item',
+      '.product-item-info',
       '.product-card',
-      '.grid-item',
-      '[class*="product-card"]',
-      '[class*="product-item"]',
-      '[class*="product_card"]',
-      '[class*="product_item"]',
-      '.woocommerce-loop-product__link',
-      '.wc-block-grid__product',
-      'li.product',
-      '.grid-view-item',
-      '.card--standard',
-      '.product-block',
-      '.s-product-card',
-      '.s-product-card-vertical',
-      '.s-result-item[data-asin]',
-      '.card-product',
-      '.product-box',
-      '.item-product',
-      '.product-inner',
-      '.products-grid .item',
-      '.catalog-item',
-      '.listing-item',
-      '.product_pod',
+      '.grid__item',
       'article.product',
-      '.shop-item',
-      '.goods-item',
-      '[itemtype*="schema.org/Product"]',
-      '[data-product-id]',
-      '[data-sku]',
-      '[data-item-id]',
-      '[class*="product"]',
-      '[class*="item"]'
+      '[class*="product-card"]',
+      'li.product-item',
+      '.product-item',
+      '.item-product',
+      'li.product',
+      '.card-product',
+      '.wc-block-grid__product',
+      '.grid-view-item',
+      '.product-miniature',
+      '.catalog-item',
+      '.product_pod',
+      '.s-result-item[data-asin]',
+      '[data-component-type="s-search-result"]',
+      '[data-product-id]'
     ];
 
-    const rawCandidates: Element[] = [];
-    const seenElements = new Set<Element>();
+    const cardQuerySelector = primaryCardSelectors.join(', ');
+    const allCandidateElements = Array.from(doc.querySelectorAll(cardQuerySelector));
 
-    for (const sel of generalCardSelectors) {
-      try {
-        const elements = doc.querySelectorAll(sel);
-        elements.forEach(el => {
-          if (!seenElements.has(el)) {
-            seenElements.add(el);
-            rawCandidates.push(el);
-          }
-        });
-      } catch {
-        // Skip invalid selector if any
-      }
-    }
-
-    // Filter down to valid product card containers
-    const filteredCards = rawCandidates.filter(card => {
-      if (card.tagName === 'BODY' || card.tagName === 'HTML' || card.tagName === 'MAIN' || (card.tagName === 'SECTION' && card.children.length > 25)) {
+    // Array Mapping: Discard main container elements and keep individual product cards!
+    // If an element contains other child elements matching the card selectors, it's a wrapper/container (e.g. products-grid), NOT a single leaf product card!
+    const individualCards = allCandidateElements.filter(el => {
+      // Discard HTML, BODY, MAIN, NAV, HEADER, FOOTER
+      const tag = el.tagName;
+      if (tag === 'BODY' || tag === 'HTML' || tag === 'MAIN' || tag === 'NAV' || tag === 'HEADER' || tag === 'FOOTER' || tag === 'SECTION' && el.children.length > 20) {
         return false;
       }
-      if (card.closest('header, footer, nav, #header, #footer, .site-header, .site-footer')) {
+      if (el.closest('header, footer, nav, #header, #footer, .site-header, .site-footer')) {
         return false;
       }
-      const text = card.textContent || '';
-      if (text.length < 10 || text.length > 2500) return false;
 
-      const hasPrice = /(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€|\bLE\b|\bL\.E\b)\s*[\d,]+|[\d,]+\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€)/i.test(text) ||
-                       card.querySelector('[class*="price"], [itemprop="price"], [data-price]') !== null;
-      
-      const hasImg = card.querySelector('img, [data-src], [data-lazy-src], picture') !== null;
-      const hasTitle = card.querySelector('h1, h2, h3, h4, h5, [class*="title"], [class*="name"], a[title]') !== null ||
-                       (card.tagName === 'A' && ((card as HTMLElement).title || text.length > 5));
-
-      return hasPrice && (hasImg || hasTitle);
-    });
-
-    // Remove nested children if the parent container is already a matched product card
-    let matchedCards: Element[] = [];
-    filteredCards.forEach(card => {
-      const isChildOfAnother = filteredCards.some(other => other !== card && other.contains(card));
-      if (!isChildOfAnother) {
-        matchedCards.push(card);
+      // Check if it contains nested child cards: if so, skip the parent container!
+      const hasChildCards = el.querySelectorAll(cardQuerySelector).length > 0;
+      if (hasChildCards) {
+        return false; // Skip the container so we only map leaf cards!
       }
+
+      // Check text content sanity
+      const text = el.textContent?.trim() || '';
+      if (text.length < 5 || text.length > 3500) return false;
+
+      return true;
     });
 
-    // Fallback extraction: if still empty, do a full-DOM sweep of all divs, lis, and articles
-    if (matchedCards.length === 0) {
-      const allDivs = Array.from(doc.querySelectorAll('div, li, article, section'));
-      matchedCards = allDivs.filter(el => {
+    // Fallback if individualCards is empty: find all divs/articles/lis with price and image
+    let targetCards = individualCards;
+    if (targetCards.length === 0) {
+      const fallbackNodes = Array.from(doc.querySelectorAll('li, article, div.item, div.product, div.card'));
+      targetCards = fallbackNodes.filter(el => {
         const text = el.textContent || '';
-        const hasPrice = /(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€|\bLE\b|\bL\.E\b)\s*[\d,]+|[\d,]+\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ)/i.test(text);
+        const hasPrice = /(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€|\bLE\b|\bL\.E\b)\s*[\d,]+|[\d,]+\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ)/i.test(text) ||
+                         el.querySelector('.price, [class*="price"], [itemprop="price"], [data-price-amount]') !== null;
         const hasImg = el.querySelector('img, [data-src]') !== null;
-        return hasPrice && hasImg && text.length > 15 && text.length < 800;
+        const notContainer = el.children.length < 20;
+        return hasPrice && hasImg && notContainer && text.length > 15 && text.length < 1000;
       }).slice(0, 100);
     }
 
-    matchedCards.forEach((card, idx) => {
-      const titleEl = card.querySelector('[itemprop="name"], .product-title, .title, .product-name, .name, h1, h2, h3, h4, h5, a[title], .woocommerce-loop-product__title, .card-title');
-      const title = titleEl?.textContent?.trim() || titleEl?.getAttribute('title')?.trim() || '';
+    // 3. Loop on each individual card separately to extract title, price, image, and link
+    targetCards.forEach((card, idx) => {
+      // A. Extract Product Title:
+      // Priority: title / a.product-item-link / h2 / h3 / .product-name / [itemprop="name"]
+      const titleEl = card.querySelector('a.product-item-link, [class*="product-item-link"], .product-item-name a, .product-item-name, h2, h3, h4, h1, [class*="product-title"], [class*="product-name"], .product-title, .product-name, [itemprop="name"], a[title]');
+      let title = titleEl?.textContent?.trim() || titleEl?.getAttribute('title')?.trim() || '';
+
+      if (!title || title.length < 3) {
+        // Try any anchor with text or image alt
+        const altText = card.querySelector('img')?.getAttribute('alt')?.trim();
+        if (altText && altText.length > 3 && !/logo|banner|icon/i.test(altText)) {
+          title = altText;
+        } else {
+          const firstLink = card.querySelector('a[href]');
+          const linkText = firstLink?.textContent?.trim();
+          if (linkText && linkText.length > 4 && !/add to cart|buy now|view|تفاصيل|أضف للسلة|شراء/i.test(linkText)) {
+            title = linkText;
+          }
+        }
+      }
+
       if (!title || title.length < 3 || seenTitles.has(title)) return;
       seenTitles.add(title);
 
-      // Price extraction
-      const text = card.textContent || '';
-      const priceEl = card.querySelector('[itemprop="price"], [data-price], .price, .product-price, .current-price, .special-price, .offer-price, .sale-price, .amount, .money');
-      const priceText = priceEl?.textContent || text;
-      
-      const priceMatch = priceText.match(/(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€)\s*([\d,]+(?:\.\d+)?)/i) ||
-                         priceText.match(/([\d,]+(?:\.\d+)?)\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ)/i) ||
-                         priceText.match(/([\d,]{2,})/);
-      
-      const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
-      const currency = normalizeCurrency(card.querySelector('[itemprop="priceCurrency"]')?.getAttribute('content') || undefined, text);
+      // B. Extract Product Price:
+      // Priority: price / .price-wrapper / [data-price-amount] / [data-price-type="finalPrice"] / regex
+      let priceVal = 0;
+      const priceWrapperEl = card.querySelector('.price-wrapper, [data-price-amount], [data-price-type="finalPrice"]');
+      const dataPriceAmount = priceWrapperEl?.getAttribute('data-price-amount') || card.querySelector('[data-price-amount]')?.getAttribute('data-price-amount');
 
-      // Image extraction
-      const imgEl = card.querySelector('[itemprop="image"], img');
+      if (dataPriceAmount) {
+        priceVal = parseFloat(dataPriceAmount) || 0;
+      }
+
+      if (priceVal <= 0) {
+        const priceEl = card.querySelector('.price-wrapper, .price, .special-price .price, .current-price, .product-price, .special-price, .offer-price, .sale-price, [class*="price"], [itemprop="price"], .amount, .money');
+        const priceText = priceEl?.textContent || card.textContent || '';
+        const priceMatch = priceText.match(/(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ|\$|£|€)\s*([\d,]+(?:\.\d+)?)/i) ||
+                           priceText.match(/([\d,]+(?:\.\d+)?)\s*(?:EGP|ج\.م|SAR|ر\.س|AED|د\.إ)/i) ||
+                           priceText.match(/([\d,]{2,}(?:\.\d+)?)/);
+        if (priceMatch) {
+          priceVal = parseFloat(priceMatch[1].replace(/,/g, '')) || 0;
+        }
+      }
+
+      // Extract original/old price
+      let originalPrice: number | undefined = undefined;
+      const oldPriceEl = card.querySelector('.old-price, .regular-price, del, .strike, [data-price-type="oldPrice"], [class*="old-price"], [class*="regular-price"]');
+      if (oldPriceEl) {
+        const oldText = oldPriceEl.textContent || '';
+        const oldMatch = oldText.match(/([\d,]+(?:\.\d+)?)/);
+        if (oldMatch) {
+          const oldVal = parseFloat(oldMatch[1].replace(/,/g, ''));
+          if (oldVal > priceVal) originalPrice = oldVal;
+        }
+      }
+
+      const currency = normalizeCurrency(
+        card.querySelector('[itemprop="priceCurrency"]')?.getAttribute('content') || undefined,
+        card.textContent || ''
+      );
+
+      // C. Extract Product Image:
+      // Priority: img.product-image-photo / data-src / src
+      const imgEl = card.querySelector('img.product-image-photo, img[data-src], img[data-lazy-src], img[data-original], img[data-zoom-image], img[srcset], img[src], img');
       const candidateImg = imgEl?.getAttribute('src') || 
                            imgEl?.getAttribute('data-src') || 
                            imgEl?.getAttribute('data-lazy-src') || 
                            imgEl?.getAttribute('data-original') ||
+                           imgEl?.getAttribute('data-zoom-image') ||
                            imgEl?.getAttribute('srcset')?.split(' ')[0] || '';
       
-      const mainImage = candidateImg.startsWith('http') ? candidateImg : (candidateImg ? new URL(candidateImg, baseUrl).href : '');
+      let mainImage = '';
+      if (candidateImg) {
+        try {
+          mainImage = candidateImg.startsWith('http') || candidateImg.startsWith('data:') 
+            ? candidateImg 
+            : new URL(candidateImg, baseUrl).href;
+        } catch {
+          mainImage = candidateImg;
+        }
+      }
 
-      // Link extraction
-      const linkEl = card.querySelector('a[href]');
-      const href = linkEl?.getAttribute('href') || '';
-      const productUrl = href.startsWith('http') ? href : (href ? new URL(href, baseUrl).href : baseUrl);
+      // D. Extract Product URL (Link):
+      // Priority: a.product-item-link / a[href]
+      const linkEl = card.querySelector('a.product-item-link, a.product-item-photo, a[href*="/product/"], a[href*="/p/"], a[href*=".html"], a[href]');
+      const href = (card.tagName === 'A' ? card.getAttribute('href') : linkEl?.getAttribute('href')) || '';
+      let productUrl = baseUrl;
+      if (href && href !== '#' && !href.startsWith('javascript:')) {
+        try {
+          productUrl = href.startsWith('http') ? href : new URL(href, baseUrl).href;
+        } catch {
+          productUrl = href;
+        }
+      }
 
       // Brand & Category
       const brand = detectBrand(title, card.querySelector('[itemprop="brand"], [data-brand], .brand')?.textContent?.trim());
@@ -715,7 +765,8 @@ export class ClientScraperEngine {
       products.push({
         id: `p_dom_${products.length + 1}`,
         title,
-        price,
+        price: priceVal,
+        originalPrice,
         currency,
         brand,
         category,
@@ -723,14 +774,47 @@ export class ClientScraperEngine {
         galleryImages: mainImage ? [mainImage] : [],
         specs: {},
         productUrl,
-        inStock: !/غير متوفر|نفذت الكمية|out of stock/i.test(text),
+        inStock: !/غير متوفر|نفذت الكمية|out of stock/i.test(card.textContent || ''),
         rating: 4.8,
         reviewsCount: 10 + (idx % 15),
         displayOrder: products.length + 1
       });
     });
 
-    // 4. GUARANTEE NEVER 0 PRODUCTS: Single Product Page Fallback
+    // 4. OpenGraph & Meta Tags Product Extraction (ONLY for Single-Product pages where 0 products were found)
+    if (products.length === 0) {
+      const ogTitle = doc.querySelector('meta[property="og:title"], meta[name="twitter:title"]')?.getAttribute('content')?.trim();
+      const ogImage = doc.querySelector('meta[property="og:image"], meta[name="twitter:image"], meta[property="og:image:secure_url"]')?.getAttribute('content')?.trim();
+      const ogPrice = doc.querySelector('meta[property="og:price:amount"], meta[property="product:price:amount"], meta[name="price"], meta[property="price:amount"]')?.getAttribute('content')?.trim();
+      const ogCurrency = doc.querySelector('meta[property="og:price:currency"], meta[property="product:price:currency"]')?.getAttribute('content')?.trim();
+
+      if (ogTitle && (ogPrice || ogImage) && !seenTitles.has(ogTitle)) {
+        const priceVal = ogPrice ? parseFloat(ogPrice.replace(/[^0-9.]/g, '')) : 0;
+        const brand = detectBrand(ogTitle);
+        const category = detectCategory(ogTitle);
+        const fallbackImage = getCategoryFallbackImage({ title: ogTitle, category, brand });
+
+        seenTitles.add(ogTitle);
+        products.push({
+          id: `p_og_${products.length + 1}`,
+          title: ogTitle,
+          price: priceVal,
+          currency: normalizeCurrency(ogCurrency, ogTitle),
+          brand,
+          category,
+          mainImage: ogImage || fallbackImage,
+          galleryImages: ogImage ? [ogImage] : [],
+          specs: {},
+          productUrl: doc.querySelector('link[rel="canonical"]')?.getAttribute('href') || baseUrl,
+          inStock: true,
+          rating: 4.9,
+          reviewsCount: 20,
+          displayOrder: products.length + 1
+        });
+      }
+    }
+
+    // 5. GUARANTEE NEVER 0 PRODUCTS: Single Product Page Fallback
     if (products.length === 0) {
       const pageHeading = doc.querySelector('h1, [itemprop="name"], .product-detail-title, .product_title')?.textContent?.trim() || doc.title;
       if (pageHeading && pageHeading.length > 2) {
@@ -743,21 +827,22 @@ export class ClientScraperEngine {
         const mainImage = candidateMain.startsWith('http') ? candidateMain : (candidateMain ? new URL(candidateMain, baseUrl).href : '');
         const brand = detectBrand(pageHeading);
         const category = detectCategory(pageHeading);
+        const fallbackImage = getCategoryFallbackImage({ title: pageHeading, category, brand });
 
         products.push({
-          id: `p_fallback_single`,
+          id: `p_single_${Date.now()}`,
           title: pageHeading,
           price: singlePrice,
           currency: normalizeCurrency(undefined, bodyText),
           brand,
           category,
-          mainImage: mainImage || getCategoryFallbackImage({ title: pageHeading, category, brand }),
+          mainImage: mainImage || fallbackImage,
           galleryImages: mainImage ? [mainImage] : [],
           specs: {},
           productUrl: baseUrl,
           inStock: true,
-          rating: 4.9,
-          reviewsCount: 25,
+          rating: 4.8,
+          reviewsCount: 12,
           displayOrder: 1
         });
       }
@@ -1236,13 +1321,16 @@ export class ClientScraperEngine {
   }
 
   private getProductDeduplicationKey(p: ExtractedProduct): string {
+    if (p.productUrl && p.productUrl.length > 15 && !p.productUrl.endsWith('/') && !p.productUrl.includes('#')) {
+      return p.productUrl.trim().toLowerCase();
+    }
     return `${p.title.trim().toLowerCase()}_${p.price}`;
   }
 
   private deduplicateProducts(products: ExtractedProduct[]): ExtractedProduct[] {
     const seen = new Set<string>();
     return products.filter(p => {
-      const key = `${p.title.trim().toLowerCase()}_${p.price}`;
+      const key = this.getProductDeduplicationKey(p);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

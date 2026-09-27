@@ -2308,8 +2308,20 @@ function extractProductsFromDom(
     }
   }
 
-  // B. Universal HTML Product Card Selectors across Prestashop, WooCommerce, Shopify, Custom E-commerce
+  // B. Universal HTML Product Card Selectors across Magento, Prestashop, WooCommerce, Shopify, Custom E-commerce
   const cardSelectors = [
+    'li.item.product-item',
+    '.product-item-info',
+    '.product-card',
+    '.grid__item',
+    'article.product',
+    '[class*="product-card"]',
+    'li.product-item',
+    '.product-item',
+    '.item-product',
+    'li.product',
+    '.card-product',
+    '.wc-block-grid__product',
     '.product-miniature',
     '.js-product-miniature',
     '.ajax_block_product',
@@ -2317,31 +2329,21 @@ function extractProductsFromDom(
     '.product-container',
     '.thumbnail-container',
     '.product_list .item',
-    '.product-card',
-    '.product-item',
-    '.item-product',
-    '.card-product',
     '.product-box',
     '.product-wrap',
     '.product-thumb',
     '.product-layout',
     'div[itemtype*="Product"]',
     '[data-id-product]',
-    '.owl-item .item',
-    '.swiper-slide .item',
-    '.slick-slide .item',
     '.prd',
     '.item-card',
     '.catalog-item',
-    '.product',
-    'article.product',
     '.product-grid-item',
     '[data-component-type="s-search-result"]',
     '.s-result-item',
     '.product-inner',
     '.product-block',
-    '[data-product-id]',
-    'li.product'
+    '[data-product-id]'
   ];
 
   const combinedCardSelector = cardSelectors.join(', ');
@@ -2350,23 +2352,38 @@ function extractProductsFromDom(
 
   if (cards.length > 0) {
     cards.each((idx, el) => {
-      if ($(el).parents(combinedCardSelector).length > 0) return;
+      // Discard container elements that contain other product cards
+      if ($(el).find(combinedCardSelector).length > 0) return;
 
       const parentSection = $(el).closest('section, .products-block, .box-product, .carousel, .owl-carousel, [class*="section"], [class*="block"]');
       const sectionTitle = parentSection.find('h1, h2, h3, .title_block, .box-title, .title-module, .section-title').first().text().trim() || '';
 
-      const title = $(el).find('.product-title, .product-name, h2, h3, .title, .name, [class*="title"], [class*="name"]').first().text().trim() ||
+      // Title: priority: title / a.product-item-link / h2 / h3
+      const title = $(el).find('a.product-item-link, [class*="product-item-link"], .product-item-name a, .product-item-name, h2, h3, h4, h1, .product-title, .product-name, [class*="title"], [class*="name"]').first().text().trim() ||
                     $(el).find('a.product-link').text().trim() ||
                     $(el).find('img').first().attr('alt')?.trim() || '';
 
       const normalizedTitle = title.toLowerCase().replace(/\s+/g, ' ');
-      if (!title || title.length < 4 || seenTitles.has(normalizedTitle)) return;
+      if (!title || title.length < 3 || seenTitles.has(normalizedTitle)) return;
 
-      const priceEl = $(el).find('.current-price, .price, [class*="price"], [class*="amount"], .prc, .special-price, .product-price').first();
-      const priceText = priceEl.text().trim();
-      if (!priceText) return;
+      // Price: priority: price / .price-wrapper / [data-price-amount]
+      let price = 0;
+      let currency = 'EGP';
+      const dataPriceAttr = $(el).find('.price-wrapper[data-price-amount], [data-price-amount]').first().attr('data-price-amount');
+      if (dataPriceAttr) {
+        price = parseFloat(dataPriceAttr) || 0;
+      }
 
-      const { price, currency } = parsePriceAndCurrency(priceText);
+      if (price <= 0) {
+        const priceEl = $(el).find('.price-wrapper, .current-price, .price, [class*="price"], [class*="amount"], .prc, .special-price, .product-price').first();
+        const priceText = priceEl.text().trim();
+        if (priceText) {
+          const parsed = parsePriceAndCurrency(priceText);
+          price = parsed.price;
+          currency = parsed.currency;
+        }
+      }
+
       if (price <= 0) return;
 
       const oldPriceEl = $(el).find('.regular-price, .old-price, .old, .original, del, .strike, [class*="old-price"], [class*="regular-price"], [class*="strike"], [class*="before"]').first();
@@ -2709,8 +2726,44 @@ function extractEmbeddedScriptProducts($: cheerio.CheerioAPI, baseUrl: string): 
     try {
       if ($(el).attr('type') === 'application/ld+json') {
         const json = JSON.parse(scriptContent);
-        const parseItem = (pObj: any) => {
-          if (pObj && (pObj['@type'] === 'Product' || pObj.offers)) {
+        
+        const traverseLd = (pObj: any) => {
+          if (!pObj || typeof pObj !== 'object') return;
+          if (Array.isArray(pObj)) {
+            pObj.forEach(traverseLd);
+            return;
+          }
+          if (Array.isArray(pObj['@graph'])) {
+            pObj['@graph'].forEach(traverseLd);
+          }
+
+          const type = (pObj['@type'] || '').toString();
+          const isNonProduct = (
+            type.includes('Organization') ||
+            type.includes('Brand') ||
+            type.includes('WebPage') ||
+            type.includes('WebSite') ||
+            type.includes('Store') ||
+            type.includes('LocalBusiness') ||
+            type.includes('BreadcrumbList')
+          );
+
+          if (isNonProduct) {
+            // Ignore entity itself; immediately look for ItemList or itemListElement
+            if (Array.isArray(pObj.itemListElement)) {
+              pObj.itemListElement.forEach((item: any) => traverseLd(item.item || item));
+            }
+            if (pObj.mainEntity) traverseLd(pObj.mainEntity);
+            if (Array.isArray(pObj.offers)) pObj.offers.forEach(traverseLd);
+            return;
+          }
+
+          if (type.includes('ItemList') && Array.isArray(pObj.itemListElement)) {
+            pObj.itemListElement.forEach((item: any) => traverseLd(item.item || item));
+            return;
+          }
+
+          if (type.includes('Product') || (pObj.offers && !isNonProduct && pObj.name)) {
             const offers = Array.isArray(pObj.offers) ? pObj.offers[0] : pObj.offers;
             const { price, currency } = parsePriceAndCurrency(offers?.price ? `${offers.price} ${offers?.priceCurrency || 'USD'}` : '0');
             const mainImg = Array.isArray(pObj.image) ? pObj.image[0] : (pObj.image || '');
@@ -2735,13 +2788,7 @@ function extractEmbeddedScriptProducts($: cheerio.CheerioAPI, baseUrl: string): 
           }
         };
 
-        if (Array.isArray(json)) {
-          json.forEach(parseItem);
-        } else if (json.itemListElement && Array.isArray(json.itemListElement)) {
-          json.itemListElement.forEach((item: any) => parseItem(item.item || item));
-        } else {
-          parseItem(json);
-        }
+        traverseLd(json);
       }
     } catch {
       // Ignore
