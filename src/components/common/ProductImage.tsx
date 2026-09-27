@@ -29,6 +29,7 @@ export const ProductImage: React.FC<ProductImageProps> = ({
 
   const [src, setSrc] = useState<string>(primaryUrl || fallbackUrl);
   const [triedProxy, setTriedProxy] = useState<boolean>(false);
+  const [triedWeserv, setTriedWeserv] = useState<boolean>(false);
   const [triedFallback, setTriedFallback] = useState<boolean>(!primaryUrl);
   const [isLoaded, setIsLoaded] = useState<boolean>(false);
   const [hasFailedAll, setHasFailedAll] = useState<boolean>(false);
@@ -39,27 +40,36 @@ export const ProductImage: React.FC<ProductImageProps> = ({
     const nextFallback = getCategoryFallbackImage(product);
     setSrc(nextPrimary || nextFallback);
     setTriedProxy(false);
+    setTriedWeserv(false);
     setTriedFallback(!nextPrimary);
     setIsLoaded(false);
     setHasFailedAll(false);
   }, [product.mainImage, (product as any).image, product.title]);
 
   const handleError = () => {
-    // Stage 1: Try through the server image proxy if it was an external image
+    // Stage 1: Try through Vercel Serverless / Edge Image Proxy
     if (!triedProxy && src && !src.includes('/api/proxy-image') && (src.startsWith('http://') || src.startsWith('https://'))) {
       setTriedProxy(true);
       setSrc(`/api/proxy-image?url=${encodeURIComponent(src)}`);
       return;
     }
 
-    // Stage 2: Fall back to verified category & brand appliance image
+    // Stage 2: Try through client-side global image CDN (weserv) if server proxy fails
+    if (!triedWeserv && primaryUrl && (primaryUrl.startsWith('http://') || primaryUrl.startsWith('https://'))) {
+      setTriedWeserv(true);
+      const cleanUrl = primaryUrl.replace(/^https?:\/\//, '');
+      setSrc(`https://images.weserv.nl/?url=${encodeURIComponent(cleanUrl)}&default=404`);
+      return;
+    }
+
+    // Stage 3: Fall back to verified category & brand appliance image
     if (!triedFallback && fallbackUrl && src !== fallbackUrl) {
       setTriedFallback(true);
       setSrc(fallbackUrl);
       return;
     }
 
-    // Stage 3: If all avenues exhausted, flag failure
+    // Stage 4: If all avenues exhausted, flag failure
     setHasFailedAll(true);
   };
 

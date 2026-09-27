@@ -39,7 +39,9 @@ import {
   Mail,
   Send,
   Building2,
-  AlertTriangle
+  AlertTriangle,
+  Cloud,
+  Monitor
 } from 'lucide-react';
 import { 
   ScrapeConfig, 
@@ -597,6 +599,85 @@ export const InputPanel: React.FC<InputPanelProps> = ({
                 </button>
               );
             })}
+          </div>
+        </div>
+
+        {/* Execution Platform Selector: Vercel Serverless vs Direct Client-Side */}
+        <div className="pt-2 border-t border-[#1E293B]">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1 mb-2">
+            <label className="text-xs font-semibold text-[#94A3B8] uppercase tracking-wider flex items-center gap-1.5">
+              <Cloud className="w-3.5 h-3.5 text-[#00D9FF]" />
+              {isAr ? 'محرك التنفيذ والاستضافة (Vercel Serverless / المتصفح المباشر):' : 'Execution Platform (Vercel Serverless / Direct Browser):'}
+            </label>
+            <span className="text-[11px] text-[#10B981] font-mono flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse"></span>
+              {isAr ? 'متوافق 100% مع Vercel بدون سيرفر خارجي' : '100% Vercel & Client-Ready'}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {/* Auto Hybrid */}
+            <button
+              type="button"
+              onClick={() => setConfig(prev => ({ ...prev, executionTarget: 'auto' }))}
+              className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-right transition-all cursor-pointer ${
+                (!config.executionTarget || config.executionTarget === 'auto')
+                  ? 'bg-gradient-to-r from-[#00D9FF]/15 to-[#0F1419] border-[#00D9FF] text-white shadow-sm'
+                  : 'bg-[#0F1419] border-[#1E293B] text-[#94A3B8] hover:border-[#334155]'
+              }`}
+            >
+              <Zap className={`w-4 h-4 shrink-0 ${(!config.executionTarget || config.executionTarget === 'auto') ? 'text-[#00D9FF]' : 'text-[#64748B]'}`} />
+              <div>
+                <div className="text-xs font-bold leading-tight flex items-center gap-1.5">
+                  {isAr ? 'هجين ذكي (تلقائي)' : 'Auto Hybrid (Recommended)'}
+                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#00D9FF]/20 text-[#00D9FF]">موصى به</span>
+                </div>
+                <div className="text-[10px] text-[#64748B] mt-0.5">
+                  {isAr ? 'Vercel Serverless أولاً مع تحول تلقائي للمتصفح' : 'Vercel Serverless with Browser Fallback'}
+                </div>
+              </div>
+            </button>
+
+            {/* Vercel Serverless Edge */}
+            <button
+              type="button"
+              onClick={() => setConfig(prev => ({ ...prev, executionTarget: 'vercel' }))}
+              className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-right transition-all cursor-pointer ${
+                config.executionTarget === 'vercel'
+                  ? 'bg-gradient-to-r from-[#3B82F6]/20 to-[#0F1419] border-[#3B82F6] text-white shadow-sm'
+                  : 'bg-[#0F1419] border-[#1E293B] text-[#94A3B8] hover:border-[#334155]'
+              }`}
+            >
+              <Cloud className={`w-4 h-4 shrink-0 ${config.executionTarget === 'vercel' ? 'text-[#3B82F6]' : 'text-[#64748B]'}`} />
+              <div>
+                <div className="text-xs font-bold leading-tight">
+                  {isAr ? 'دوال Vercel السحابية (Edge API)' : 'Vercel Serverless Functions'}
+                </div>
+                <div className="text-[10px] text-[#64748B] mt-0.5">
+                  {isAr ? 'سحب سحابي عبر دوال /api/*' : 'Serverless Functions (/api/*)'}
+                </div>
+              </div>
+            </button>
+
+            {/* Direct Client-Side Browser */}
+            <button
+              type="button"
+              onClick={() => setConfig(prev => ({ ...prev, executionTarget: 'client' }))}
+              className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-right transition-all cursor-pointer ${
+                config.executionTarget === 'client'
+                  ? 'bg-gradient-to-r from-[#10B981]/20 to-[#0F1419] border-[#10B981] text-white shadow-sm'
+                  : 'bg-[#0F1419] border-[#1E293B] text-[#94A3B8] hover:border-[#334155]'
+              }`}
+            >
+              <Monitor className={`w-4 h-4 shrink-0 ${config.executionTarget === 'client' ? 'text-[#10B981]' : 'text-[#64748B]'}`} />
+              <div>
+                <div className="text-xs font-bold leading-tight">
+                  {isAr ? 'مباشر من المتصفح (Client-Side)' : 'Direct In-Browser (100% Client)'}
+                </div>
+                <div className="text-[10px] text-[#64748B] mt-0.5">
+                  {isAr ? 'بدون أي سيرفر عبر متصفحك مباشرة' : 'Zero Server Needed (DOMParser)'}
+                </div>
+              </div>
+            </button>
           </div>
         </div>
 

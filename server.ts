@@ -18,7 +18,7 @@ async function startServer() {
 
   // Health check
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', engine: 'ApexScrape v2.4.0', timestamp: new Date().toISOString() });
+    res.json({ status: 'ok', engine: 'ApexScrape v2.5.0 (Vercel Serverless & Client-Side Hybrid)', timestamp: new Date().toISOString() });
   });
 
   // Presets

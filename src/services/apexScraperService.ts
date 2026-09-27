@@ -5,6 +5,7 @@ import { ImageHandler } from '../managers/imageHandler.ts';
 import { ErrorHandler } from '../managers/errorHandler.ts';
 import { SCRAPE_CONFIG } from '../config/scrapeConfig.ts';
 import { ScrapeConfig, ScrapeResult } from '../types/scraper.ts';
+import { clientScraperEngine } from './clientScraperEngine.ts';
 
 export class ApexScraperService {
   public sessionManager = new SessionManager();
@@ -22,7 +23,7 @@ export class ApexScraperService {
     const targetEmail = (email || '').trim();
     const targetUrl = config.url.trim();
 
-    console.log(`[ApexScraperService] 🚀 بدء جلسة سحب جديدة: ${targetEmail} | الرابط: ${targetUrl}`);
+    console.log(`[ApexScraperService] 🚀 بدء جلسة سحب جديدة (${config.executionTarget || 'auto'}): ${targetEmail} | الرابط: ${targetUrl}`);
 
     // 1. Absolute session creation - guarantees unique UUID and flushes any old session
     const sessionId = this.sessionManager.createSession(targetEmail, targetUrl);
@@ -30,7 +31,7 @@ export class ApexScraperService {
     // 2. Isolated tenant container
     const tenantId = this.multiTenantStore.createTenant(targetEmail);
 
-    // 3. Inform server of session start
+    // 3. Inform server of session start (graceful in serverless / static)
     try {
       await fetch('/api/session/create', {
         method: 'POST',
@@ -47,53 +48,66 @@ export class ApexScraperService {
         })
       });
     } catch (e) {
-      console.warn('[ApexScraperService] Warning creating session on backend:', e);
+      // Ignored for purely client-side static deployments
     }
 
-    // 4. Request scraping from server with full cache busting and session isolation headers
+    // 4. Request scraping: Vercel Serverless Function or Direct Browser Engine
     const nonce = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const timestamp = Date.now();
 
-    const fetchOperation = async (): Promise<ScrapeResult> => {
-      const response = await fetch('/api/scrape', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-          'X-Session-ID': sessionId,
-          'X-Timestamp': timestamp.toString(),
-          'X-Nonce': nonce,
-          'X-Tenant-ID': tenantId
-        },
-        body: JSON.stringify({
-          ...config,
+    let finalResult: ScrapeResult | null = null;
+
+    if (config.executionTarget === 'client') {
+      console.log('[ApexScraperService] 🌐 جاري السحب المباشر من المتصفح (Client-side)...');
+      finalResult = await clientScraperEngine.scrape(config, onProgress);
+    } else {
+      try {
+        const fetchOperation = async (): Promise<ScrapeResult> => {
+          const response = await fetch('/api/scrape', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              'Pragma': 'no-cache',
+              'Expires': '0',
+              'X-Session-ID': sessionId,
+              'X-Timestamp': timestamp.toString(),
+              'X-Nonce': nonce,
+              'X-Tenant-ID': tenantId
+            },
+            body: JSON.stringify({
+              ...config,
+              sessionId,
+              tenantId,
+              targetEmail,
+              _nonce: nonce,
+              _t: timestamp,
+              _session: sessionId
+            })
+          });
+
+          if (!response.ok) {
+            const errJson = await response.json().catch(() => ({}));
+            throw new Error(errJson.error || `Scraping failed with status ${response.status}`);
+          }
+
+          const result: ScrapeResult = await response.json();
+          return result;
+        };
+
+        finalResult = await this.errorHandler.executeWithRetry(fetchOperation, {
           sessionId,
-          tenantId,
-          targetEmail,
-          _nonce: nonce,
-          _t: timestamp,
-          _session: sessionId
-        })
-      });
-
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}));
-        throw new Error(errJson.error || `Scraping failed with status ${response.status}`);
+          email: targetEmail
+        });
+      } catch (serverErr) {
+        console.warn('[ApexScraperService] تعذر استكمال السحب عبر Vercel Serverless API، التحول التلقائي للسحب المباشر من المتصفح:', serverErr);
+        // Automatic Fallback to Browser Client-Side Scraping
+        finalResult = await clientScraperEngine.scrape(config, onProgress);
       }
-
-      const result: ScrapeResult = await response.json();
-      return result;
-    };
-
-    const finalResult = await this.errorHandler.executeWithRetry(fetchOperation, {
-      sessionId,
-      email: targetEmail
-    });
+    }
 
     if (!finalResult) {
-      throw new Error(`تعذر استكمال السحب بعد ${SCRAPE_CONFIG.MAX_RETRIES} محاولات.`);
+      throw new Error(`تعذر استكمال السحب بعد محاولات متعددة عبر السيرفر والمتصفح.`);
     }
 
     // 5. Filter & validate product images (no guesswork or trackers)

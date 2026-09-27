@@ -102,6 +102,7 @@ export interface ScrapeConfig {
   strictPrecisionMode?: boolean;
   minIntegrityScore?: number;
   tenantId?: string;
+  executionTarget?: 'auto' | 'vercel' | 'client';
 }
 
 export interface ExtractedEmail {
@@ -296,6 +297,7 @@ export interface ScrapeResult {
     };
   };
   contentTypeDetection?: ContentTypeDetectionReport;
+  markdown?: string;
 }
 
 export type DetectedPageType = 'products' | 'ecommerce_store' | 'webmail' | 'brand' | 'category' | 'search' | 'contact' | 'single_product' | 'content';
