@@ -2854,16 +2854,83 @@ export async function runScrapingEngine(config: ScrapeConfig): Promise<ScrapeRes
     httpStatus = fetchResponse.status;
     
     if (!fetchResponse.ok && (fetchResponse.status === 403 || fetchResponse.status === 429 || fetchResponse.status === 503)) {
-      addLog('warn', `الموقع يفرض حماية متقدمة من البوتات (HTTP ${fetchResponse.status}). تفعيل المحرك الذكي للاستخلاص الشامل والمحاكاة عالية الدقة.`);
-      isSimulated = true;
+      addLog('warn', `الموقع يفرض حماية متقدمة من البوتات (HTTP ${fetchResponse.status}). جاري تجربة سلسلة بروكسيات السحب البديلة (AllOrigins / corsproxy)...`);
+      
+      const serverFallbackProxies = [
+        (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        (url: string) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`
+      ];
+
+      let recovered = false;
+      for (const getPUrl of serverFallbackProxies) {
+        try {
+          const pCtrl = new AbortController();
+          const pTimeout = setTimeout(() => pCtrl.abort(), 6000);
+          const pRes = await fetch(getPUrl(normalizedUrl), { signal: pCtrl.signal });
+          clearTimeout(pTimeout);
+          if (pRes.ok) {
+            const pHtml = await pRes.text();
+            if (pHtml && pHtml.length > 250 && !pHtml.startsWith('{"error":')) {
+              rawHtml = pHtml;
+              totalBytes = Buffer.byteLength(rawHtml, 'utf8');
+              httpStatus = 200;
+              isSimulated = false;
+              recovered = true;
+              addLog('success', `تم كسر الحظر وجلب كود الصفحة بنجاح عبر بروكسي بديل (${(totalBytes / 1024).toFixed(1)} KB)`);
+              break;
+            }
+          }
+        } catch {
+          // Continue to next fallback
+        }
+      }
+
+      if (!recovered) {
+        addLog('warn', `تفعيل المحرك الذكي للاستخلاص الشامل والمحاكاة عالية الدقة.`);
+        isSimulated = true;
+      }
     } else {
       rawHtml = await fetchResponse.text();
       totalBytes = Buffer.byteLength(rawHtml, 'utf8');
       addLog('success', `تم جلب صفحة الويب بنجاح (${(totalBytes / 1024).toFixed(1)} KB) - كود الحالة HTTP ${httpStatus}`);
     }
   } catch (fetchErr: any) {
-    addLog('warn', `تعذر الاتصال المباشر (${fetchErr.message}). تشغيل المحاكي التكيفي لاستخراج الهيكل والبيانات.`);
-    isSimulated = true;
+    addLog('warn', `تعذر الاتصال المباشر (${fetchErr.message}). جاري محاولة الجلب عبر بروكسيات الويب...`);
+    const serverFallbackProxies = [
+      (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+      (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+      (url: string) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`
+    ];
+
+    let recovered = false;
+    for (const getPUrl of serverFallbackProxies) {
+      try {
+        const pCtrl = new AbortController();
+        const pTimeout = setTimeout(() => pCtrl.abort(), 6000);
+        const pRes = await fetch(getPUrl(normalizedUrl), { signal: pCtrl.signal });
+        clearTimeout(pTimeout);
+        if (pRes.ok) {
+          const pHtml = await pRes.text();
+          if (pHtml && pHtml.length > 250 && !pHtml.startsWith('{"error":')) {
+            rawHtml = pHtml;
+            totalBytes = Buffer.byteLength(rawHtml, 'utf8');
+            httpStatus = 200;
+            isSimulated = false;
+            recovered = true;
+            addLog('success', `تم تجاوز الخطأ وجلب كود الصفحة بنجاح عبر بروكسي بديل (${(totalBytes / 1024).toFixed(1)} KB)`);
+            break;
+          }
+        }
+      } catch {
+        // Continue
+      }
+    }
+
+    if (!recovered) {
+      addLog('warn', `تشغيل المحاكي التكيفي لاستخراج الهيكل والبيانات.`);
+      isSimulated = true;
+    }
   }
 
   // Parse with Cheerio
