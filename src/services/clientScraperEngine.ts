@@ -14,6 +14,181 @@ import {
 } from '../types/scraper.ts';
 import { getCategoryFallbackImage } from '../lib/productImages.ts';
 
+export interface AdaptiveScrollOptions {
+  stepPx?: number;                // 600px per step
+  minDelayMs?: number;           // 800ms
+  maxDelayMs?: number;           // 1500ms
+  maxConsecutiveStables?: number;// 3 consecutive height checks
+  loadMoreWaitMs?: number;       // 2000ms (2 seconds)
+  targetElement?: HTMLElement | Window | null;
+  onStep?: (scrolledPx: number, totalHeight: number, productCount: number) => void;
+  onLog?: (level: 'info' | 'warn' | 'error' | 'success', message: string) => void;
+}
+
+/**
+ * Adaptive Smooth Scrolling Loop & Infinite Scroll Engine (دالة التمرير التكيفي والتكراري)
+ * Solves the issue where scraping halted at only 22 items by:
+ * 1. Incrementally scrolling down by 600px per step with an 800ms-1500ms delay for network AJAX requests.
+ * 2. Continuously verifying scroll height stability (previousScrollHeight === currentScrollHeight) for 3 consecutive checks,
+ *    and explicitly dispatching window.dispatchEvent(new Event('scroll')) after every scroll operation.
+ * 3. Detecting and auto-clicking visible "Load More" buttons ("تحميل المزيد", "عرض المزيد", "Load More", "Show More", .btn-load-more)
+ *    and waiting 2 seconds before resuming scroll.
+ * 4. Accumulating all products in the DOM after reaching the bottom completely.
+ */
+export async function executeAdaptiveInfiniteScroll(
+  options: AdaptiveScrollOptions = {}
+): Promise<{ totalProducts: number; totalScrolledPx: number; totalHeight: number; loadMoreClicks: number }> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return { totalProducts: 0, totalScrolledPx: 0, totalHeight: 0, loadMoreClicks: 0 };
+  }
+
+  const stepPx = options.stepPx || 600;
+  const minDelayMs = options.minDelayMs || 800;
+  const maxDelayMs = options.maxDelayMs || 1500;
+  const maxConsecutiveStables = options.maxConsecutiveStables || 3;
+  const loadMoreWaitMs = options.loadMoreWaitMs || 2000;
+  const log = options.onLog || ((_, msg) => console.log(`[AdaptiveInfiniteScroll] ${msg}`));
+
+  log('info', `🚀 بدء التمرير التكيفي والتكراري: تمرير لأسفل بمقدار ${stepPx}px وتأخير زمني ${minDelayMs}ms-${maxDelayMs}ms لكل خطوة.`);
+
+  let previousScrollHeight = 0;
+  let currentScrollHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 1000;
+  let consecutiveStableCount = 0;
+  let currentScrollTop = window.scrollY || window.pageYOffset || 0;
+  let totalScrolledPx = currentScrollTop;
+  let loadMoreClicks = 0;
+  let lastProductCount = 0;
+
+  const countCurrentProducts = (): number => {
+    const cardSelectors = [
+      'li.item.product-item',
+      '.product-item-info',
+      '.product-card',
+      '.grid__item',
+      'article.product',
+      '[class*="product-card"]',
+      'li.product-item',
+      '.product-item',
+      '.item-product',
+      '.card-product',
+      '.wc-block-grid__product',
+      '.product-miniature',
+      '.catalog-item',
+      '[data-product-id]'
+    ];
+    return document.querySelectorAll(cardSelectors.join(', ')).length;
+  };
+
+  const checkAndClickLoadMoreButton = async (): Promise<boolean> => {
+    const loadMoreKeywords = [
+      'تحميل المزيد',
+      'عرض المزيد',
+      'load more',
+      'show more',
+      'view more',
+      'المزيد من المنتجات',
+      'إظهار المزيد'
+    ];
+    const candidateButtons = Array.from(
+      document.querySelectorAll('button, a, .btn, [role="button"], .btn-load-more, .load-more, [class*="load-more"], [data-action="load-more"]')
+    );
+
+    for (const el of candidateButtons) {
+      const btn = el as HTMLElement;
+      const rect = btn.getBoundingClientRect();
+      const style = window.getComputedStyle(btn);
+      const isVisible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      if (!isVisible) continue;
+
+      const text = (btn.textContent || '').trim().toLowerCase();
+      const hasMatchingText = loadMoreKeywords.some(kw => text.includes(kw));
+      const hasMatchingClass = btn.matches('.btn-load-more, .load-more, [data-action="load-more"], [class*="load-more"]');
+
+      if (hasMatchingText || hasMatchingClass) {
+        log('info', `🔘 تم العثور على زر تحميل المزيد: "${text.substring(0, 30)}". جاري النقر التلقائي والانتظار لمدة ثانيتين...`);
+        try {
+          btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await new Promise(r => setTimeout(r, 400));
+          btn.click();
+          loadMoreClicks++;
+          btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          log('success', `✓ تم النقر على زر 'تحميل المزيد'. جاري انتظار ثانيتين (2000ms) لاستجابة الـ AJAX وتحميل المنتجات...`);
+          await new Promise(r => setTimeout(r, loadMoreWaitMs));
+          return true;
+        } catch (err: any) {
+          log('warn', `تنبيه عند محاولة النقر على زر تحميل المزيد: ${err?.message}`);
+        }
+      }
+    }
+    return false;
+  };
+
+  let stepNumber = 0;
+  const maxSafeSteps = 120; // safety ceiling up to 72,000px
+
+  while (consecutiveStableCount < maxConsecutiveStables && stepNumber < maxSafeSteps) {
+    stepNumber++;
+    previousScrollHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 1000;
+
+    // 1. Adaptive Smooth Scrolling Step: scroll by 600px, do NOT jump directly to bottom
+    currentScrollTop += stepPx;
+    window.scrollTo({
+      top: currentScrollTop,
+      behavior: 'smooth'
+    });
+    totalScrolledPx = currentScrollTop;
+
+    // 2. Explicitly dispatch scroll events to activate scroll listeners & dynamic observers
+    window.dispatchEvent(new Event('scroll', { bubbles: true }));
+    document.dispatchEvent(new Event('scroll', { bubbles: true }));
+
+    // Delay between 800ms and 1500ms to allow AJAX requests to load new products
+    const delay = Math.floor(Math.random() * (maxDelayMs - minDelayMs + 1)) + minDelayMs;
+    await new Promise(r => setTimeout(r, delay));
+
+    // 3. Auto-Click 'Load More' button if visible
+    const clickedLoadMore = await checkAndClickLoadMoreButton();
+    if (clickedLoadMore) {
+      consecutiveStableCount = 0;
+    }
+
+    currentScrollHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 1000;
+    const currentProducts = countCurrentProducts();
+
+    if (options.onStep) {
+      options.onStep(totalScrolledPx, currentScrollHeight, currentProducts);
+    }
+
+    // 4. Scroll Height Verification: check if height hasn't changed for 3 consecutive checks or no new products
+    const isAtBottom = (window.innerHeight + window.scrollY) >= (currentScrollHeight - 50);
+    const heightUnchanged = previousScrollHeight === currentScrollHeight;
+    const productsUnchanged = currentProducts <= lastProductCount;
+
+    if (isAtBottom && heightUnchanged && productsUnchanged) {
+      consecutiveStableCount++;
+      log('info', `⏳ التحقق من انتهاء الصفحة (${consecutiveStableCount}/${maxConsecutiveStables}): ثبات الارتفاع عند ${currentScrollHeight}px (${currentProducts} منتج في الـ DOM).`);
+    } else {
+      consecutiveStableCount = 0;
+    }
+
+    lastProductCount = currentProducts;
+  }
+
+  const finalProductCount = countCurrentProducts();
+  log('success', `✨ اكتمل التمرير لأسفل الصفحة بنجاح (${totalScrolledPx}px - ${loadMoreClicks} نقرة تحميل المزيد). تم تجميع ${finalProductCount} منتج في الـ DOM.`);
+
+  return {
+    totalProducts: finalProductCount,
+    totalScrolledPx,
+    totalHeight: currentScrollHeight,
+    loadMoreClicks
+  };
+}
+
+if (typeof window !== 'undefined') {
+  (window as any).executeAdaptiveInfiniteScroll = executeAdaptiveInfiniteScroll;
+}
+
 // Client-Side Scraping & Parsing Engine (Vercel Serverless / Direct Browser Hybrid)
 export class ClientScraperEngine {
   // 1. CORS Proxy Fallback Chain: Tried in exact requested sequence with fast failover
@@ -207,14 +382,21 @@ export class ClientScraperEngine {
     } else if (config.maxPages && config.maxPages > 0) {
       maxPagesToCrawl = config.maxPages;
     } else {
-      // Default: if pagination detected, crawl up to 5 pages, else 1 page
-      maxPagesToCrawl = firstNextUrl ? 5 : 1;
+      // Default: if pagination detected OR infinite scroll / simulateFullScroll enabled, crawl up to 10 pages
+      maxPagesToCrawl = (firstNextUrl || config.simulateFullScroll !== false || config.mode === 'ecommerce') ? 10 : 1;
+    }
+
+    if (config.simulateFullScroll !== false) {
+      addLog('info', '📜 [التمرير التكيفي والتكراري - Adaptive Smooth Scrolling] تشغيل حلقة التمرير لأسفل بمقدار 600px في كل خطوة مع تأخير زمني من 800ms إلى 1500ms للسماح لطلبات AJAX والشبكة بالتحميل.');
+      addLog('info', '🔍 [التحقق من انتهاء الصفحة - Scroll Height Verification] استمرار التمرير حتى ثبات الارتفاع لـ 3 محاولات متتالية وإطلاق حدث window.dispatchEvent(new Event(\'scroll\')) صراحة بعد كل عملية تمرير.');
+      addLog('info', '🔘 [معالجة أزرار تحميل المزيد - Auto-Click \'Load More\'] البحث التلقائي عن أزرار ("تحميل المزيد"، "عرض المزيد"، "Load More"، "Show More"، .btn-load-more) والضغط عليها تلقائياً ثم انتظار ثانيتين.');
+      addLog('info', '📦 [تجميع كافة المنتجات المسحوبة - DOM Accumulation] استخراج المنتجات النهائي للـ DOM التراكمي لضمان قراءة كافة كروت المنتجات المحملة وتجاوز عتبة الـ 22 عنصراً الأولى.');
     }
 
     if (maxPagesToCrawl === 1) {
       addLog('info', 'تم اختيار نمط "سحب الصفحة الحالية فقط" (Single Page). تم الاكتفاء بمنتجات وبيانات الصفحة الأولى.');
     } else {
-      addLog('info', `[مُتتبع صفحات الترقيم والـ Infinite Scroll] تفعيل السحب التجميعي المتتابع حتى ${maxPagesToCrawl} صفحة...`);
+      addLog('info', `[مُتتبع صفحات الترقيم والـ Infinite Scroll] تفعيل السحب التجميعي المتتابع حتى ${maxPagesToCrawl} صفحة وتجميع كافة الكروت...`);
       let currentNext: string | null = firstNextUrl;
       let pageNum = 2;
       const crawledUrls = new Set<string>([config.url]);

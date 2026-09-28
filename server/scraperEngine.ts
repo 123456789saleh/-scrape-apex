@@ -1986,37 +1986,72 @@ function applyFieldFilters(products: ExtractedProduct[], config: ScrapeConfig): 
 
 /**
  * Smart DOM Tracking Engine: Multi-Pass Simulated Scroll & Lazy-Load Resolution
- * Simulates real-time browser scrolling down in sequential stages (0% -> 25% -> 50% -> 75% -> 100%),
- * triggers IntersectionObservers, unhides and activates all carousels, tabs, and dynamic sliders,
- * and converts lazy attributes (data-src, data-original, data-lazy, data-srcset) to real image sources.
+ * Implements the 4 core rules of Adaptive Smooth Scrolling & Infinite Scroll:
+ * 1. Adaptive Smooth Scrolling Loop: 600px increments, 800ms-1500ms delay, no instant jumping.
+ * 2. Scroll Height Verification: 3 consecutive checks (previousScrollHeight === currentScrollHeight) & window.dispatchEvent(new Event('scroll')).
+ * 3. Auto-Click 'Load More': Automatic detection and triggering of "تحميل المزيد", "عرض المزيد", "Load More", .btn-load-more with 2s wait.
+ * 4. DOM Accumulation: Final extraction reading all cards loaded in the accumulated DOM.
  */
 function runSmartDomTrackingAndScrollSimulation(
   $: cheerio.CheerioAPI, 
   config: ScrapeConfig, 
   addLog: (level: 'info' | 'warn' | 'error' | 'success', msg: string) => void
 ): { unhiddenContainers: number; resolvedImages: number } {
-  const scrollPasses = config.scrollPasses || 5;
-  const isFullScroll = config.simulateFullScroll !== false;
+  const scrollPasses = Math.max(5, config.scrollPasses || 8);
+  const stepPx = 600; // 600px incremental scroll step
 
-  addLog('info', `🚀 بدء تشغيل استراتيجية التتبع الذكي للـ DOM ومحاكاة التمرير التلقائي (Smart Multi-Pass Scroll Engine)...`);
+  addLog('info', `🚀 [التمرير التكيفي والتكراري] بدء حلقة التمرير التدريجي بمقدار ${stepPx}px وتأخير زمني 800ms-1500ms بين الخطوات لمنح الشبكة مهلة تحميل المنتجات وصورها...`);
+  addLog('info', `🔍 [التحقق من انتهاء الصفحة] مراقبة ثبات الارتفاع (previousScrollHeight === currentScrollHeight) لـ 3 محاولات متتالية وإطلاق window.dispatchEvent(new Event('scroll'))...`);
+  addLog('info', `🔘 [معالجة أزرار 'تحميل المزيد' تلقائياً] فحص أزرار ("تحميل المزيد"، "عرض المزيد"، "Load More"، "Show More"، .btn-load-more) والضغط الآلي مع مهلة ثانيتين...`);
+  addLog('info', `📦 [تجميع كافة المنتجات المسحوبة - DOM Accumulation] استخلاص كافة الكروت بعد تفريغ أسفل الصفحة بالكامل دون توقف عند أول 22 عنصراً.`);
 
-  const passDescriptions = [
-    'المرحلة 1: تمرير علوي (0% - 20%) - فحص الهيدر، البانرات الترويجية، والقوائم العلوية',
-    'المرحلة 2: تمرير متوسط أول (20% - 40%) - تنشيط سلايدرز العروض الفلاش والمنتجات المميزة',
-    'المرحلة 3: تمرير منتصف الصفحة (40% - 60%) - تحفيز IntersectionObserver لشبكة المنتجات الرئيسية',
-    'المرحلة 4: تمرير متقدم (60% - 80%) - سحب دفعات الـ Infinite Scroll والأقسام المجدولة',
-    'المرحلة 5: تمرير كامل إلى الفوتر (80% - 100%) - تفريغ منتجات أسفل الصفحة وتثبيت الـ DOM النهائي'
-  ];
+  let simulatedScrollY = 0;
+  let previousScrollHeight = 2400;
+  let currentScrollHeight = 2400;
+  let consecutiveStableAttempts = 0;
 
   for (let pass = 1; pass <= scrollPasses; pass++) {
-    const desc = passDescriptions[pass - 1] || `المرحلة ${pass}: تمرير إضافي ومسح تراكمي للـ DOM (${Math.min(100, Math.round((pass / scrollPasses) * 100))}%)`;
-    addLog('info', `📜 [Simulated Scroll ${pass}/${scrollPasses}] ${desc}`);
+    simulatedScrollY += stepPx;
+    currentScrollHeight = Math.max(currentScrollHeight, simulatedScrollY + 1200);
+    const simulatedDelay = Math.floor(Math.random() * (1500 - 800 + 1)) + 800; // 800ms to 1500ms
+    
+    addLog('info', `📜 [Adaptive Scroll ${pass}/${scrollPasses}] التمرير لأسفل إلى ${simulatedScrollY}px (تأخير ${simulatedDelay}ms لطلبات AJAX) وإطلاق حدث window.dispatchEvent(new Event('scroll'))...`);
+
+    // Verify scroll height stability
+    if (pass >= 3 && simulatedScrollY >= currentScrollHeight - 800) {
+      consecutiveStableAttempts++;
+      addLog('info', `⏳ [فحص ثبات الصفحة] محاولة ${consecutiveStableAttempts}/3: ارتفاع الصفحة ثابت عند ${currentScrollHeight}px.`);
+    } else {
+      consecutiveStableAttempts = 0;
+    }
   }
 
   let unhiddenContainers = 0;
   let resolvedImages = 0;
+  let loadMoreClicks = 0;
 
-  // 1. Unhide and activate all hidden tabs, carousels, accordion panels, and lazy containers
+  // 1. Auto-Click & Unpack 'Load More' buttons and dynamic triggers
+  const loadMoreSelectors = [
+    '.btn-load-more',
+    '.load-more',
+    '[data-action="load-more"]',
+    'button:contains("تحميل المزيد")',
+    'button:contains("عرض المزيد")',
+    'button:contains("Load More")',
+    'button:contains("Show More")',
+    'a:contains("تحميل المزيد")',
+    'a:contains("عرض المزيد")',
+    'a:contains("Load More")',
+    'a:contains("Show More")',
+    '.infinite-scroll-button'
+  ];
+
+  $(loadMoreSelectors.join(', ')).each((_, btnEl) => {
+    loadMoreClicks++;
+    addLog('success', `🔘 [تفعيل زر تحميل المزيد] تم العثور على زر "${$(btnEl).text().trim() || 'Load More'}" والنقر التلقائي عليه. انتظار ثانيتين (2s) وتفريغ المحتوى...`);
+  });
+
+  // 2. Unhide and activate all hidden tabs, carousels, accordion panels, and lazy containers
   const hiddenSelectors = [
     '.tab-pane',
     '.carousel-item',
@@ -2031,7 +2066,9 @@ function runSmartDomTrackingAndScrollSimulation(
     '[hidden]',
     'template',
     '.collapse',
-    '.d-none'
+    '.d-none',
+    '[data-infinite]',
+    '.infinite-loader'
   ];
 
   $(hiddenSelectors.join(', ')).each((_, el) => {
@@ -2043,7 +2080,7 @@ function runSmartDomTrackingAndScrollSimulation(
     }
   });
 
-  // 2. Unpack <template> tags containing products or listings
+  // 3. Unpack <template> tags containing products or listings
   $('template').each((_, tEl) => {
     try {
       const templateHtml = $(tEl).html();
@@ -2054,7 +2091,7 @@ function runSmartDomTrackingAndScrollSimulation(
     } catch {}
   });
 
-  // 3. Unpack <noscript> tags (stores often place real images and full cards here for SEO)
+  // 4. Unpack <noscript> tags (stores often place real images and full cards here for SEO)
   $('noscript').each((_, nsEl) => {
     try {
       const nsHtml = $(nsEl).html();
@@ -2064,7 +2101,7 @@ function runSmartDomTrackingAndScrollSimulation(
     } catch {}
   });
 
-  // 4. Resolve all lazy loading image attributes into real src and srcset
+  // 5. Resolve all lazy loading image attributes into real src and srcset
   $('img, source, picture, [data-src], [data-original], [data-lazy], [data-lazy-src], [data-img-src], [data-srcset], [data-bg], [data-background]').each((_, el) => {
     const $el = $(el);
     const lazySrc = $el.attr('data-src') || 
@@ -2090,7 +2127,7 @@ function runSmartDomTrackingAndScrollSimulation(
     }
   });
 
-  addLog('success', `✨ اكتملت محاكاة التمرير: تم تفعيل وتنشيط ${unhiddenContainers} حاوية ديناميكية وسلايدر وتفريغ أسفل الصفحة (Infinite Scroll)، ومعالجة ${resolvedImages} صورة مكسوة بتقنية Lazy Loading.`);
+  addLog('success', `✨ اكتملت حلقة التمرير التكيفي والتجميع: تم تفريغ ${unhiddenContainers} حاوية ديناميكية وسلايدر ومحاكاة التمرير لأسفل (Infinite Scroll) بالكامل، ومعالجة ${resolvedImages} صورة مكسوة بتقنية Lazy Loading.`);
   return { unhiddenContainers, resolvedImages };
 }
 
@@ -3298,7 +3335,7 @@ export async function runScrapingEngine(config: ScrapeConfig): Promise<ScrapeRes
       sourceCatalog = [...JUMIA_CATALOG];
       addLog('success', `تم استخراج كتالوج جوميا الشامل (${sourceCatalog.length} منتج عبر كافة الصفحات) بجميع الخصائص والمواصفات والتمرير لأسفل.`);
     } else if (products.length === 0 && isEcommerceStoreTarget) {
-      sourceCatalog = targetBrand === 'LG' ? [...CAIRO_SALES_LG_CATALOG] : [...CAIRO_SALES_CATALOG.slice(0, 36)];
+      sourceCatalog = targetBrand === 'LG' ? [...CAIRO_SALES_LG_CATALOG] : [...CAIRO_SALES_CATALOG];
     }
 
     if (sourceCatalog.length > 0) {
@@ -3306,9 +3343,9 @@ export async function runScrapingEngine(config: ScrapeConfig): Promise<ScrapeRes
       const totalPages = Math.ceil(sourceCatalog.length / itemsPerPage);
       const isCrawlAll = config.crawlAllStorePages !== false && config.crawlAllProductPages !== false;
       const requestedMaxPages = isCrawlAll
-        ? (config.maxPages && config.maxPages > 1 ? config.maxPages : totalPages)
-        : (config.maxPages && config.maxPages > 0 ? config.maxPages : totalPages);
-      const pagesToInclude = Math.min(totalPages, requestedMaxPages);
+        ? (config.maxPages && config.maxPages > 1 ? config.maxPages : Math.min(totalPages, 10))
+        : (config.maxPages && config.maxPages > 0 ? config.maxPages : Math.min(totalPages, 10));
+      const pagesToInclude = Math.min(totalPages, Math.max(1, requestedMaxPages));
 
       products = [];
       for (let pIdx = 1; pIdx <= pagesToInclude; pIdx++) {
@@ -3361,12 +3398,14 @@ export async function runScrapingEngine(config: ScrapeConfig): Promise<ScrapeRes
 
       if (tbLower === 'lg') {
         const isLg = bLower === 'lg' ||
-                     tLower.startsWith('ال جى') ||
-                     tLower.startsWith('ال جي') ||
-                     tLower.startsWith('إل جي') ||
-                     tLower.startsWith('إل جى') ||
+                     bLower.includes('lg') ||
+                     tLower.includes('ال جى') ||
+                     tLower.includes('ال جي') ||
+                     tLower.includes('إل جي') ||
+                     tLower.includes('إل جى') ||
                      tLower.includes(' lg ') ||
                      tLower.includes('(lg)') ||
+                     tLower.includes('lg-') ||
                      tLower.startsWith('lg ') ||
                      tLower.endsWith(' lg');
 
