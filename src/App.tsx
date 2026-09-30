@@ -10,6 +10,7 @@ import { InputPanel } from './components/InputPanel.tsx';
 import { LiveCrawlerProgress } from './components/LiveCrawlerProgress.tsx';
 import { ResultsDashboard } from './components/ResultsDashboard.tsx';
 import { HistoryDrawer } from './components/HistoryDrawer.tsx';
+import { DisclaimerModal } from './components/DisclaimerModal.tsx';
 import { 
   Globe2, 
   ShieldCheck, 
@@ -21,7 +22,8 @@ import {
   FileSpreadsheet, 
   CheckCircle2,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Scale
 } from 'lucide-react';
 import { globalApexScraperService } from './services/apexScraperService';
 
@@ -88,6 +90,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [isDisclaimerOpen, setIsDisclaimerOpen] = useState(false);
   const fullResultsCacheRef = useRef<Map<string, ScrapeResult>>(new Map());
   const previousUrlRef = useRef<string>(config.url);
 
@@ -463,6 +466,22 @@ export default function App() {
 
       </main>
 
+      {/* Footer & Disclaimer link */}
+      <footer className="border-t border-[#1E293B] py-6 px-4 text-center mt-12 bg-[#0B0F15]/50">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#64748B]">
+          <p>© {new Date().getFullYear()} Scrape Apex AI Pro. {isAr ? 'جميع الحقوق محفوظة' : 'All rights reserved'}.</p>
+          <button
+            onClick={() => setIsDisclaimerOpen(true)}
+            className="flex items-center gap-1.5 hover:text-[#00D9FF] transition-colors cursor-pointer text-amber-400/90 hover:text-amber-300"
+          >
+            <span>⚖️</span>
+            <span className="underline underline-offset-4 font-medium">
+              {isAr ? 'إشعار إبراء الذمة وشروط الاستخدام' : 'Legal Disclaimer & Terms of Use'}
+            </span>
+          </button>
+        </div>
+      </footer>
+
       {/* 3. History Drawer */}
       <HistoryDrawer
         isOpen={isHistoryOpen}
@@ -474,6 +493,13 @@ export default function App() {
           setConfig(prev => ({ ...prev, url: full.url, mode: full.mode }));
         }}
         onClearHistory={clearHistory}
+        lang={lang}
+      />
+
+      {/* 4. Disclaimer & Terms of Use Modal */}
+      <DisclaimerModal
+        isOpenControlled={isDisclaimerOpen ? true : undefined}
+        onCloseControlled={() => setIsDisclaimerOpen(false)}
         lang={lang}
       />
     </div>
